@@ -40,10 +40,20 @@
 
 ## 🚀 快速启动
 1. 安装依赖
+
+⚠️需要python环境
+
+安装flask
+
+```bash
 pip install flask
+```
 
 2. 运行程序
-python main.py
+
+```bash
+python app.py
+```
 
 3. 自动行为
 - 程序启动自动打开浏览器页面http://127.0.0.1:7861
