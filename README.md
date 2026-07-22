@@ -43,8 +43,6 @@
 
 ⚠️需要python环境
 
-安装flask
-
 ```bash
 pip install flask
 ```
