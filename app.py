@@ -320,6 +320,8 @@ EDIT_HTML = """
         .btn-del-check { background:#d63031; color:white; }
         .btn-del-img { background:#636e72; color:white; }
         .btn-add-tag { background:#00897b; color:white; }
+        .btn-del-all { background:#e17055; color:white; }
+        .btn-add-all { background:#00b894; color:white; }
         
         .add-tag-line { display:flex; gap:8px; align-items:center; }
         .add-tag-line input {
@@ -428,6 +430,14 @@ EDIT_HTML = """
             <button class="change-dir-btn" onclick="openModal()">切换数据集文件夹</button>
         </div>
 
+        <form method="post" class="img-nav-bar">
+            <div class="btn-wrap">
+                <button formaction="/prev_img" type="submit">上一张</button>
+                <button formaction="/next_img" type="submit">下一张</button>
+                <button formaction="/del_img_file" class="btn-del-img" type="submit" onclick="return confirm('确认删除当前图片及其标签文件？');">删除图片+标签文件</button>
+            </div>
+        </form>
+
         <form method="post" action="/add_new_tag" class="add-tag-line">
             <input type="text" name="new_tag" placeholder="输入标签，添加至当前图片末尾">
             <button class="btn-add-tag" type="submit">添加标签</button>
@@ -447,6 +457,8 @@ EDIT_HTML = """
             </div>
             <div class="btn-wrap">
                 <button class="btn-del-check" type="submit">删除勾选标签</button>
+                <button class="btn-del-all" type="submit" formaction="/batch_del_all_imgs" onclick="return confirm('确认从所有图片中删除所选标签？');">所有图片删除</button>
+                <button class="btn-add-all" type="submit" formaction="/batch_add_all_imgs">所有图片添加</button>
             </div>
         </form>
 
@@ -454,9 +466,6 @@ EDIT_HTML = """
             <textarea name="full_tag_text">{{ raw_tag_text }}</textarea>
             <div class="btn-wrap">
                 <button class="btn-save" type="submit">保存文本标签</button>
-                <button formaction="/prev_img">上一张</button>
-                <button formaction="/next_img">下一张</button>
-                <button formaction="/del_img_file" class="btn-del-img">删除图片+标签文件</button>
             </div>
         </form>
     </div>
@@ -610,15 +619,57 @@ def batch_del():
         f.write(", ".join(new_tags))
     return redirect(url_for("home"))
 
+@app.route("/batch_del_all_imgs", methods=["POST"])
+def batch_del_all_imgs():
+    del_list = request.form.getlist("del_tag_list")
+    if not del_list: return redirect(url_for("home"))
+    for img_name in img_list:
+        stem, _ = os.path.splitext(img_name)
+        txt_file = os.path.join(CURRENT_IMG_DIR, f"{stem}.txt")
+        if not os.path.exists(txt_file):
+            continue
+        with open(txt_file, "r", encoding="utf-8") as f:
+            tag_text = f.read().strip()
+        tags = [t.strip() for t in tag_text.split(",") if t.strip()]
+        new_tags = [t for t in tags if t not in del_list]
+        if new_tags != tags:
+            with open(txt_file, "w", encoding="utf-8") as f:
+                f.write(", ".join(new_tags))
+    return redirect(url_for("home"))
+
+@app.route("/batch_add_all_imgs", methods=["POST"])
+def batch_add_all_imgs():
+    add_list = request.form.getlist("del_tag_list")
+    if not add_list: return redirect(url_for("home"))
+    for img_name in img_list:
+        stem, _ = os.path.splitext(img_name)
+        txt_file = os.path.join(CURRENT_IMG_DIR, f"{stem}.txt")
+        if os.path.exists(txt_file):
+            with open(txt_file, "r", encoding="utf-8") as f:
+                tag_text = f.read().strip()
+            tags = [t.strip() for t in tag_text.split(",") if t.strip()]
+        else:
+            tags = []
+        changed = False
+        for t in add_list:
+            if t not in tags:
+                tags.append(t)
+                changed = True
+        if changed:
+            with open(txt_file, "w", encoding="utf-8") as f:
+                f.write(", ".join(tags))
+    return redirect(url_for("home"))
+
 @app.route("/add_new_tag", methods=["POST"])
 def add_tag():
     new_t = request.form.get("new_tag", "").strip()
     if not new_t: return redirect(url_for("home"))
     tags = get_current_tag_list()
-    tags.append(new_t)
-    txt_path = get_txt_path()
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(", ".join(tags))
+    if new_t not in tags:
+        tags.append(new_t)
+        txt_path = get_txt_path()
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(", ".join(tags))
     return redirect(url_for("home"))
 
 @app.route("/del_img_file", methods=["POST"])
