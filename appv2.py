@@ -561,6 +561,28 @@ EDIT_HTML = """
         .replace-btn-current:hover { background: #1994f0; }
         .replace-btn-all { background: #e17055; }
         .replace-btn-all:hover { background: #ff7f50; }
+
+        /* 标签拖拽排序 */
+        .tag-item { cursor: grab; }
+        .tag-item:active { cursor: grabbing; }
+        .tag-item.dragging {
+            opacity: 0.85;
+            cursor: grabbing;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+        }
+        body.dark .tag-item.dragging { background: #4a5568; }
+        .tag-item-placeholder {
+            display: inline-block;
+            vertical-align: middle;
+            border-width: 2px; border-style: dashed; border-color: #74b9ff;
+            border-radius: 4px;
+            background: transparent !important;
+            margin: 6px 8px;
+        }
+        body.dark .tag-item.drag-over-left { box-shadow: -2px 0 0 0 #74b9ff; }
+        body.light .tag-item.drag-over-left { box-shadow: -2px 0 0 0 #0984e3; }
+        body.dark .tag-item.drag-over-right { box-shadow: 2px 0 0 0 #74b9ff; }
+        body.light .tag-item.drag-over-right { box-shadow: 2px 0 0 0 #0984e3; }
     </style>
 </head>
 <body class="dark">
@@ -821,6 +843,154 @@ EDIT_HTML = """
                 alert('请求失败：' + e.message);
             }
         }
+
+        // ===== 标签拖拽排序（长按触发） =====
+        (function() {
+            const LONG_PRESS_MS = 350;
+            const MOVE_THRESHOLD = 5;
+            let lpTimer = null;
+            let lpStartX = 0, lpStartY = 0;
+            let isDragging = false;
+            let draggedItem = null;
+            let dragOffsetX = 0, dragOffsetY = 0;
+            let placeholder = null;
+
+            function clearDropIndicators() {
+                document.querySelectorAll('.tag-item.drag-over-left, .tag-item.drag-over-right')
+                    .forEach(el => el.classList.remove('drag-over-left', 'drag-over-right'));
+            }
+
+            function getDropTarget(x, y) {
+                const elements = document.elementsFromPoint(x, y);
+                for (const el of elements) {
+                    if (el.classList && el.classList.contains('tag-item')
+                        && el !== draggedItem && el !== placeholder) {
+                        return el;
+                    }
+                }
+                return null;
+            }
+
+            function updateDropIndicator(target, x) {
+                clearDropIndicators();
+                if (!target) return;
+                const rect = target.getBoundingClientRect();
+                const mid = rect.left + rect.width / 2;
+                if (x < mid) {
+                    target.classList.add('drag-over-left');
+                } else {
+                    target.classList.add('drag-over-right');
+                }
+            }
+
+            function startDrag(item, clientX, clientY) {
+                isDragging = true;
+                draggedItem = item;
+                const rect = item.getBoundingClientRect();
+                dragOffsetX = clientX - rect.left;
+                dragOffsetY = clientY - rect.top;
+                placeholder = document.createElement('span');
+                placeholder.className = 'tag-item-placeholder';
+                placeholder.style.width = rect.width + 'px';
+                placeholder.style.height = rect.height + 'px';
+                item.parentNode.insertBefore(placeholder, item);
+                item.style.position = 'fixed';
+                item.style.left = rect.left + 'px';
+                item.style.top = rect.top + 'px';
+                item.style.width = rect.width + 'px';
+                item.style.zIndex = '9999';
+                item.classList.add('dragging');
+                document.body.style.userSelect = 'none';
+            }
+
+            function endDrag(clientX, clientY) {
+                const target = getDropTarget(clientX, clientY);
+                if (target) {
+                    const rect = target.getBoundingClientRect();
+                    const mid = rect.left + rect.width / 2;
+                    if (clientX < mid) {
+                        target.parentNode.insertBefore(placeholder, target);
+                    } else {
+                        target.parentNode.insertBefore(placeholder, target.nextSibling);
+                    }
+                } else {
+                    draggedItem.parentNode.appendChild(placeholder);
+                }
+                placeholder.parentNode.replaceChild(draggedItem, placeholder);
+                placeholder = null;
+                draggedItem.style.position = '';
+                draggedItem.style.left = '';
+                draggedItem.style.top = '';
+                draggedItem.style.width = '';
+                draggedItem.style.zIndex = '';
+                draggedItem.classList.remove('dragging');
+                document.body.style.userSelect = '';
+                clearDropIndicators();
+                draggedItem = null;
+                isDragging = false;
+
+                const items = document.querySelectorAll('.tag-item');
+                const newOrder = Array.from(items).map(it => it.dataset.origTag);
+                const textarea = document.querySelector('textarea[name="full_tag_text"]');
+                if (textarea) textarea.value = newOrder.join(', ');
+                fetch('/api/reorder_tags', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({order: newOrder})
+                }).then(r => r.json()).then(data => {
+                    if (!data || !data.ok) {
+                        alert('顺序保存失败：' + ((data && data.error) || '未知错误'));
+                    }
+                }).catch(e => {
+                    alert('请求失败：' + e.message);
+                });
+            }
+
+            function setupDrag(item) {
+                item.addEventListener('mousedown', (e) => {
+                    if (e.button !== 0) return;
+                    if (e.target.tagName === 'INPUT') return;
+                    if (e.target.classList && e.target.classList.contains('edit-icon')) return;
+                    if (e.target.classList && e.target.classList.contains('inline-input')) return;
+                    lpStartX = e.clientX;
+                    lpStartY = e.clientY;
+                    lpTimer = setTimeout(() => {
+                        startDrag(item, e.clientX, e.clientY);
+                    }, LONG_PRESS_MS);
+                });
+            }
+
+            document.addEventListener('mousemove', (e) => {
+                if (lpTimer && !isDragging) {
+                    const dx = e.clientX - lpStartX;
+                    const dy = e.clientY - lpStartY;
+                    if (Math.abs(dx) > MOVE_THRESHOLD || Math.abs(dy) > MOVE_THRESHOLD) {
+                        clearTimeout(lpTimer);
+                        lpTimer = null;
+                    }
+                }
+                if (!isDragging) return;
+                e.preventDefault();
+                draggedItem.style.left = (e.clientX - dragOffsetX) + 'px';
+                draggedItem.style.top = (e.clientY - dragOffsetY) + 'px';
+                const target = getDropTarget(e.clientX, e.clientY);
+                updateDropIndicator(target, e.clientX);
+            });
+
+            document.addEventListener('mouseup', (e) => {
+                if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+                if (isDragging) endDrag(e.clientX, e.clientY);
+            });
+
+            function init() {
+                document.querySelectorAll('.tag-item').forEach(setupDrag);
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', init);
+            } else {
+                init();
+            }
+        })();
     </script>
 </body>
 </html>
@@ -1027,6 +1197,24 @@ def api_replace_tags():
                 f.write(", ".join(new_tags))
             changed_files += 1
     return {"ok": True, "changed_files": changed_files}
+
+@app.route("/api/reorder_tags", methods=["POST"])
+def api_reorder_tags():
+    payload = request.get_json(silent=True) or {}
+    new_order = payload.get("order", [])
+    if not isinstance(new_order, list) or not new_order:
+        return {"ok": False, "error": "无顺序数据"}
+    current = get_current_tag_list()
+    current_set = set(current)
+    new_set = set(str(x) for x in new_order)
+    if new_set != current_set:
+        return {"ok": False, "error": "标签集合不匹配（缺少或多余）"}
+    txt_path = get_txt_path()
+    if not txt_path:
+        return {"ok": False, "error": "无当前图片"}
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(", ".join(str(x) for x in new_order))
+    return {"ok": True}
 
 if __name__ == "__main__":
     _load_translator()
