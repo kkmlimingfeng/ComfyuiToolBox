@@ -87,7 +87,7 @@ python app.py
 ## 📂 项目结构
 .  
 ├── app.py            # 主程序文件  
-└── appv2.py          # v2版主程序文件  
+├── appv2.py          # v2版主程序文件  
 └── last_path.txt     # 自动生成，记录上次打开的文件夹路径
 
 ## 📄 License
