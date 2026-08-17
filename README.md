@@ -1,7 +1,7 @@
 # ImageLabelEditingTool
 手动图片标签编辑工具（for Lora-Train）
 
-> 本项目由豆包AI辅助生成
+> 本项目由 MiniMax M3 辅助开发
 
 ## 📸 图片标签手动编辑工具（Flask + Tkinter）
 一款轻量、本地运行、无网络依赖的图片数据集标签手动校对工具，专为 Lora 训练数据集打标、改标签、清洗标签设计。
