@@ -442,6 +442,9 @@ EDIT_HTML = """
         body.dark .theme-toggle:hover { background: #38383a; }
         body.light .theme-toggle:hover { background: #e9e9eb; }
 
+        .btn-replace { background: #fdcb6e; color: #2c2c2e; cursor: pointer; }
+        .btn-replace:hover { background: #ffeaa7; }
+
         /* 文件夹选择弹窗遮罩层 */
         .modal-mask {
             display: none;
@@ -487,6 +490,77 @@ EDIT_HTML = """
             cursor: pointer;
             font-size: 15px;
         }
+
+        /* 批量替换弹窗 */
+        .replace-modal-box {
+            min-width: 560px;
+            max-width: 80vw;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            text-align: left;
+        }
+        .replace-table-wrap {
+            max-height: 50vh;
+            overflow-y: auto;
+            margin: 6px 0 20px 0;
+            border-radius: 6px;
+            border-width: 1px; border-style: solid;
+        }
+        body.dark .replace-table-wrap { border-color: #3a3a3c; }
+        body.light .replace-table-wrap { border-color: #d2d2d7; }
+        .replace-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        .replace-table th {
+            text-align: left;
+            padding: 10px 14px;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        body.dark .replace-table th { background: #1c1c1e; color: #74b9ff; }
+        body.light .replace-table th { background: #f5f5f7; color: #0984e3; border-bottom: 1px solid #d2d2d7; }
+        .replace-table td {
+            padding: 8px 14px;
+            border-top-width: 1px; border-top-style: solid;
+            word-break: break-all;
+        }
+        body.dark .replace-table td { border-top-color: #3a3a3c; }
+        body.light .replace-table td { border-top-color: #e9e9eb; }
+        .replace-table input {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 4px;
+            border-width: 1px; border-style: solid;
+            font-size: 14px;
+            transition: background 0.3s, color 0.3s, border-color 0.3s;
+        }
+        body.dark .replace-table input { background: #1c1c1e; color: #e6e6e6; border-color: #3a3a3c; }
+        body.light .replace-table input { background: #ffffff; color: #2c2c2e; border-color: #d2d2d7; }
+        .replace-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+        }
+        .replace-actions button {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .replace-btn-cancel { background: #636e72; }
+        .replace-btn-cancel:hover { background: #7f8c8d; }
+        .replace-btn-current { background: #0984e3; }
+        .replace-btn-current:hover { background: #1994f0; }
+        .replace-btn-all { background: #e17055; }
+        .replace-btn-all:hover { background: #ff7f50; }
     </style>
 </head>
 <body class="dark">
@@ -501,6 +575,27 @@ EDIT_HTML = """
                 <button class="modal-btn" type="submit">📂 浏览文件夹</button>
             </form>
             <button class="modal-close" onclick="closeModal()">取消</button>
+        </div>
+    </div>
+
+    <!-- 批量替换弹窗 -->
+    <div class="modal-mask" id="replaceModal">
+        <div class="modal-box replace-modal-box">
+            <h3 class="modal-title">批量替换标签</h3>
+            <p class="modal-tip">左侧为原标签，右侧输入新标签（留空则删除该标签）</p>
+            <div class="replace-table-wrap">
+                <table class="replace-table">
+                    <thead>
+                        <tr><th>原标签</th><th>替换为</th></tr>
+                    </thead>
+                    <tbody id="replaceTableBody"></tbody>
+                </table>
+            </div>
+            <div class="replace-actions">
+                <button class="replace-btn-cancel" type="button" onclick="closeReplaceModal()">取消</button>
+                <button class="replace-btn-current" type="button" onclick="doReplace(false)">仅替换本图</button>
+                <button class="replace-btn-all" type="button" onclick="doReplace(true)">替换全部图片</button>
+            </div>
         </div>
     </div>
 
@@ -548,6 +643,7 @@ EDIT_HTML = """
                 <button class="btn-del-all" type="submit" formaction="/batch_del_all_imgs" onclick="return confirm('确认从所有图片中删除所选标签？');">所有图片删除</button>
                 <button class="btn-add-all" type="submit" formaction="/batch_add_all_imgs">所有图片添加</button>
                 <button class="btn-translate" id="translateBtn" type="button" onclick="doTranslate()">🌐 中文翻译</button>
+                <button class="btn-replace" type="button" onclick="openReplaceModal()">🔄 批量替换</button>
             </div>
         </form>
 
@@ -664,6 +760,65 @@ EDIT_HTML = """
                 alert('请求失败：' + e.message);
             } finally {
                 if (btn) { btn.disabled = false; btn.innerText = '🌐 关闭翻译'; btn.classList.add('active'); }
+            }
+        }
+
+        // ===== 批量替换 =====
+        function openReplaceModal() {
+            const checked = document.querySelectorAll('.tag-item input[type="checkbox"]:checked');
+            if (checked.length === 0) {
+                alert('请先勾选要替换的标签');
+                return;
+            }
+            const tbody = document.getElementById('replaceTableBody');
+            tbody.innerHTML = '';
+            checked.forEach(cb => {
+                const item = cb.closest('.tag-item');
+                const orig = item.dataset.origTag;
+                const tr = document.createElement('tr');
+                const td1 = document.createElement('td');
+                td1.textContent = orig;
+                const td2 = document.createElement('td');
+                const inp = document.createElement('input');
+                inp.type = 'text';
+                inp.dataset.orig = orig;
+                inp.placeholder = '新标签（留空则删除）';
+                td2.appendChild(inp);
+                tr.appendChild(td1);
+                tr.appendChild(td2);
+                tbody.appendChild(tr);
+            });
+            document.getElementById('replaceModal').style.display = 'flex';
+            const firstInput = tbody.querySelector('input');
+            if (firstInput) firstInput.focus();
+        }
+        function closeReplaceModal() {
+            document.getElementById('replaceModal').style.display = 'none';
+        }
+        async function doReplace(applyAll) {
+            const rows = document.querySelectorAll('#replaceTableBody tr');
+            const pairs = [];
+            rows.forEach(tr => {
+                const orig = tr.cells[0].textContent;
+                const neu = tr.querySelector('input').value.trim();
+                pairs.push({orig: orig, neu: neu});
+            });
+            if (pairs.length === 0) { closeReplaceModal(); return; }
+            if (applyAll && !confirm('确认将选中的标签在所有图片中替换？')) return;
+            try {
+                const resp = await fetch('/api/replace_tags', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({pairs: pairs, all: applyAll})
+                });
+                const data = await resp.json();
+                if (data && data.ok) {
+                    location.reload();
+                } else {
+                    alert('替换失败：' + (data && data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('请求失败：' + e.message);
             }
         }
     </script>
@@ -829,6 +984,49 @@ def api_translate():
         if zh:
             out[t] = zh
     return {"ok": _mt_model is not None, "translations": out}
+
+@app.route("/api/replace_tags", methods=["POST"])
+def api_replace_tags():
+    payload = request.get_json(silent=True) or {}
+    pairs = payload.get("pairs", [])
+    apply_all = bool(payload.get("all"))
+    if not isinstance(pairs, list) or not pairs:
+        return {"ok": False, "error": "无替换项"}
+    mapping = {}
+    for p in pairs:
+        if not isinstance(p, dict):
+            continue
+        orig = (p.get("orig") or "").strip()
+        if not orig:
+            continue
+        mapping[orig] = (p.get("neu") or "").strip()
+    if not mapping:
+        return {"ok": False, "error": "无有效替换项"}
+    if not img_list:
+        return {"ok": False, "error": "没有可操作的目标图片"}
+    targets = img_list if apply_all else [img_list[current_idx]]
+    changed_files = 0
+    for img_name in targets:
+        stem, _ = os.path.splitext(img_name)
+        txt_file = os.path.join(CURRENT_IMG_DIR, f"{stem}.txt")
+        if not os.path.exists(txt_file):
+            continue
+        with open(txt_file, "r", encoding="utf-8") as f:
+            tag_text = f.read().strip()
+        tags = [t.strip() for t in tag_text.split(",") if t.strip()]
+        new_tags = []
+        for t in tags:
+            if t in mapping:
+                neu = mapping[t]
+                if neu and neu not in new_tags:
+                    new_tags.append(neu)
+            else:
+                new_tags.append(t)
+        if new_tags != tags:
+            with open(txt_file, "w", encoding="utf-8") as f:
+                f.write(", ".join(new_tags))
+            changed_files += 1
+    return {"ok": True, "changed_files": changed_files}
 
 if __name__ == "__main__":
     _load_translator()
