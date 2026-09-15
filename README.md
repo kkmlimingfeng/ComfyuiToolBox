@@ -4,12 +4,12 @@
 >
 > 用一个轻量的 Web 门户统一管理多个独立工具，让常用的图片、Prompt、LoRA 与数据集小工具可以快速启动、集中使用，同时保持彼此独立。
 
-![ComfyUI Toolbox](images/portal.png)
-
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square)
 ![Local](https://img.shields.io/badge/Local--First-✓-2EA043?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+
+![ComfyUI Toolbox](images/portal.png)
 
 ## Overview
 
