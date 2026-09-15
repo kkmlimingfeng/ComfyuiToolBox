@@ -103,6 +103,16 @@ ComfyUI-Toolbox/
 
 ### 2. 安装依赖
 
+部分工具需要 `llama-cpp-python`。
+
+Windows / Python 3.12 / CUDA 12.8 可以使用：
+
+`llama_cpp_python-0.3.49+cu128-cp312-cp312-win_amd64.whl`
+
+下载页面，下载好需放在项目根目录：
+
+<https://github.com/JamePeng/llama-cpp-python/releases>
+
 首次运行：
 
 ```bat
@@ -116,6 +126,32 @@ python\python.exe
 ```
 
 安装项目依赖，并检查 PyTorch / CUDA 等核心组件。
+
+#### 🤖 模型
+
+项目中的部分功能使用 Hugging Face 上公开发布的模型。
+
+**Hy-MT2 1.8B**
+
+用于本地文本翻译。
+
+模型仓库：
+
+<https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF>
+
+当前使用：
+
+```text
+Hy-MT2-1.8B-Q4_K_M.gguf
+```
+
+**Qwen3-VL-4B-FP8**
+
+用于视觉语言相关功能。
+
+模型仓库：
+
+<https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-FP8>
 
 ### 3. 启动门户
 
