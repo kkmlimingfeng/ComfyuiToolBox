@@ -1,0 +1,9 @@
+{
+  "id": "img2prompt",
+  "group": "本地工具箱",
+  "name": "Krea2提示词反推",
+  "icon": "🖼️",
+  "port": 7867,
+  "script": "app.py",
+  "desc": "Qwen3-VL 视觉模型反推图像生成提示词"
+}

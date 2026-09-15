@@ -1,0 +1,9 @@
+{
+  "id": "lora_inspect",
+  "group": "本地工具箱",
+  "name": "Lora参数分析",
+  "icon": "🔍",
+  "port": 7864,
+  "script": "app.py",
+  "desc": "查看 LoRA / LyCORIS 的算法、rank/alpha、底模与训练参数"
+}
