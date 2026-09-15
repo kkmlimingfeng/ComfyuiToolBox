@@ -4,12 +4,7 @@
 >
 > 用一个轻量的 Web 门户统一管理多个独立工具，让常用的图片、Prompt、LoRA 与数据集小工具可以快速启动、集中使用，同时保持彼此独立。
 
-<!--
-首屏展示图预留：
-建议放一张 16:9 或 3:2 的门户总览截图。
-
-![ComfyUI Toolbox](docs/images/portal.png)
--->
+![ComfyUI Toolbox](images/portal.png)
 
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square)
@@ -62,24 +57,20 @@
 
 > **后续新增工具** 会继续沿用相同的门户接入方式，因此 README 的工具表也可以按同样格式继续向下扩展。
 
-<!--
-工具截图预留区域
-
 ### 图片标签编辑器
-![图片标签编辑器](docs/images/editor.png)
+![图片标签编辑器](images/editor.png)
 
 ### Krea2 提示词反推
-![Krea2 提示词反推](docs/images/img2prompt.png)
+![Krea2 提示词反推](images/img2prompt.png)
 
 ### LoRA 参数分析
-![LoRA 参数分析](docs/images/lora-inspect.png)
+![LoRA 参数分析](images/lora-inspect.png)
 
 ### 批量文件后缀更改
-![批量文件后缀更改](docs/images/renamer.png)
+![批量文件后缀更改](images/renamer.png)
 
 ### Danbooru 标签超市
-![Danbooru 标签超市](docs/images/danbooru.png)
--->
+![Danbooru 标签超市](images/danbooru.png)
 
 ---
 
