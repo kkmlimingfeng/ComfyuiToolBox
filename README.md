@@ -9,7 +9,7 @@
 ![Local](https://img.shields.io/badge/Local--First-✓-2EA043?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
-![ComfyUI Toolbox](images/portal.png)
+![ComfyUI Toolbox](images/portal.png) 
 
 ## Overview
 
