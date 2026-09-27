@@ -355,11 +355,50 @@ def inspect_one(path):
         or "sdxl" in str(info["base_model_name"] or "").lower()
     )
 
+    # kohya 新版把分辨率 / batch / 标签频率等放进 ss_datasets（JSON 数组），
+    # 老版才有 ss_resolution / ss_batch_size_per_device 等顶层键，两边都读并互为回退
+    datasets = safe_get(meta, "ss_datasets")
+    if isinstance(datasets, str) and datasets.startswith("["):
+        try:
+            datasets = json.loads(datasets)
+        except json.JSONDecodeError:
+            datasets = []
+    ds_list = []
+    if isinstance(datasets, list):
+        for ds in datasets:
+            if isinstance(ds, dict):
+                ds_list.append({
+                    "batch_size_per_device": to_int(ds.get("batch_size_per_device")),
+                    "num_train_images": to_int(ds.get("num_train_images")),
+                    "num_reg_images": to_int(ds.get("num_reg_images")),
+                    "resolution": ds.get("resolution"),
+                    "enable_bucket": ds.get("enable_bucket"),
+                    "min_bucket_reso": to_int(ds.get("min_bucket_reso")),
+                    "max_bucket_reso": to_int(ds.get("max_bucket_reso")),
+                })
+    info["datasets"] = ds_list
+
     info["resolution"] = safe_get(meta, "ss_resolution")
+    if info["resolution"] is None:
+        for ds in ds_list:
+            if ds["resolution"]:
+                info["resolution"] = "x".join(str(x) for x in ds["resolution"])
+                break
+    if info["resolution"] is None:
+        info["resolution"] = safe_get(meta, "modelspec.resolution")
+
     info["clip_skip"] = safe_get(meta, "ss_clip_skip")
+    info["max_token_length"] = to_int(safe_get(meta, "ss_max_token_length"))
     info["batch_size_per_device"] = to_int(safe_get(meta, "ss_batch_size_per_device"))
-    info["total_batch_size"] = to_int(safe_get(meta, "ss_total_batch_size"))
+    if info["batch_size_per_device"] is None:
+        for ds in ds_list:
+            if ds["batch_size_per_device"] is not None:
+                info["batch_size_per_device"] = ds["batch_size_per_device"]
+                break
     info["grad_accum"] = to_int(safe_get(meta, "ss_gradient_accumulation_steps"))
+    info["total_batch_size"] = to_int(safe_get(meta, "ss_total_batch_size"))
+    if info["total_batch_size"] is None and info["batch_size_per_device"] is not None:
+        info["total_batch_size"] = info["batch_size_per_device"] * (info["grad_accum"] or 1)
 
     info["learning_rate"] = to_float(safe_get(meta, "ss_learning_rate"))
     info["unet_lr"] = to_float(safe_get(meta, "ss_unet_lr"))
@@ -397,6 +436,38 @@ def inspect_one(path):
     info["caption_dropout_rate"] = to_float(safe_get(meta, "ss_caption_dropout_rate"))
     info["caption_tag_dropout_rate"] = to_float(safe_get(meta, "ss_caption_tag_dropout_rate"))
     info["loss_type"] = safe_get(meta, "ss_loss_type")
+
+    # ---- 标签频率（ss_tag_frequency：{数据集目录: {标签: 出现次数}}）----
+    tag_freq = safe_get(meta, "ss_tag_frequency")
+    if isinstance(tag_freq, str) and tag_freq.startswith("{"):
+        try:
+            tag_freq = json.loads(tag_freq)
+        except json.JSONDecodeError:
+            tag_freq = None
+    tag_counter = Counter()
+    if isinstance(tag_freq, dict):
+        for _dir, tags in tag_freq.items():
+            if isinstance(tags, dict):
+                for t, c in tags.items():
+                    tag_counter[t] += to_int(c) or 0
+    if not tag_counter:  # 顶层键缺失时从 ss_datasets 里取
+        for ds in datasets if isinstance(datasets, list) else []:
+            if isinstance(ds, dict) and isinstance(ds.get("tag_frequency"), dict):
+                for _dir, tags in ds["tag_frequency"].items():
+                    if isinstance(tags, dict):
+                        for t, c in tags.items():
+                            tag_counter[t] += to_int(c) or 0
+    info["tag_frequency"] = tag_counter.most_common()  # [[tag, count], ...] 按次数降序
+    info["tag_total"] = sum(tag_counter.values())
+
+    # ---- 数据集目录（各文件夹图片数 × 重复次数）----
+    ds_dirs = safe_get(meta, "ss_dataset_dirs")
+    if isinstance(ds_dirs, str) and ds_dirs.startswith("{"):
+        try:
+            ds_dirs = json.loads(ds_dirs)
+        except json.JSONDecodeError:
+            ds_dirs = None
+    info["dataset_dirs"] = ds_dirs if isinstance(ds_dirs, dict) else {}
 
     # ---- 模型 hash / 训练器信息 ----
     info["sd_model_hash"] = safe_get(meta, "ss_sd_model_hash") or safe_get(meta, "sshs_model_hash")
