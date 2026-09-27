@@ -16,6 +16,9 @@ except Exception:
 
 _mt_model = None
 _mt_device_info = "未加载"
+# llama.cpp 同一模型上下文不支持多线程并发推理（并发会触发 CUDA error 直接崩掉整个进程），
+# 快速切图时页面会并发发起 /api/translate，必须用锁串行化
+_mt_lock = threading.Lock()
 _MT_MODEL_NAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
 _MT_MODEL_REPO = "tencent/Hy-MT2-1.8B-GGUF"
 # 目标语言：label 为界面显示名，value 用于翻译指令（英文语言名）
@@ -179,9 +182,10 @@ def translate_text(text):
     try:
         lang = _translate_cfg.get("target_lang", "Simplified Chinese")
         prompt = f"Translate the following segment into {lang}, without additional explanation.\n\n{text}"
-        out = _mt_model.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=128, temperature=0.0)
+        with _mt_lock:  # 串行化推理，防止并发导致 llama.cpp / CUDA 崩溃
+            out = _mt_model.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=128, temperature=0.0)
         return out["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"[translate error] {e}")
@@ -200,7 +204,8 @@ PATH_RECORD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "las
 
 def load_last_folder():
     if os.path.exists(PATH_RECORD_FILE):
-        with open(PATH_RECORD_FILE, "r", encoding="utf-8") as f:
+        # utf-8-sig 兼容外部编辑器写入 BOM 的情况
+        with open(PATH_RECORD_FILE, "r", encoding="utf-8-sig") as f:
             path = f.read().strip()
             if os.path.isdir(path):
                 return path
@@ -225,12 +230,16 @@ img_list = []
 current_idx = 0
 
 def refresh_file_list():
-    global img_list
+    global img_list, current_idx
     if not os.path.isdir(CURRENT_IMG_DIR):
         img_list = []
+        current_idx = 0
         return
     all_files = sorted(os.listdir(CURRENT_IMG_DIR))
     img_list = [f for f in all_files if f.lower().endswith(IMG_SUFFIX)]
+    # 文件列表变短（图片被删/目录变化）时钳制索引，避免越界 500
+    if current_idx >= len(img_list):
+        current_idx = max(0, len(img_list) - 1)
 
 def get_img_path():
     if not img_list:
@@ -438,6 +447,31 @@ EDIT_HTML = """
         body.light .top-bar { border-bottom:1px solid #d2d2d7; }
 
         .progress { font-size:16px; font-weight:bold; color:#74b9ff; }
+        .img-name {
+            margin-left:10px;
+            font-weight:normal;
+            font-size:13px;
+            opacity:0.75;
+            max-width:320px;
+            display:inline-block;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+            vertical-align:bottom;
+        }
+        .nav-row { display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap; }
+        .jump-line { display:flex; gap:8px; align-items:center; margin-top:8px; }
+        .jump-line input {
+            width:80px;
+            padding:8px;
+            border-radius:4px;
+            border-width:1px; border-style:solid;
+            transition: background 0.3s, color 0.3s, border-color 0.3s;
+        }
+        body.dark .jump-line input { background:#29292b; color:#e6e6e6; border-color:#3a3a3c; }
+        body.light .jump-line input { background:#ffffff; color:#2c2c2e; border-color:#d2d2d7; }
+        .btn-jump { background:#0984e3; color:white; }
+        .btn-jump:hover { background:#1994f0; }
         .change-dir-btn {
             padding:6px 10px;border:none;border-radius:4px;cursor:pointer;
             transition: all 0.2s;
@@ -810,20 +844,26 @@ EDIT_HTML = """
 
     <div class="control-area">
         <div class="top-bar">
-            <div class="progress">进度：{{now}} / {{total}}</div>
+            <div class="progress">进度：{{now}} / {{total}}{% if img_name %}<span class="img-name" title="{{ img_name }}">{{ img_name }}</span>{% endif %}</div>
             <div style="display: flex; gap: 10px;">
                 <button class="change-dir-btn" onclick="openTranslateCfg()">⚙️ 翻译设置</button>
                 <button class="change-dir-btn" onclick="openModal()">切换数据集文件夹</button>
             </div>
         </div>
 
-        <form method="post" class="img-nav-bar" id="navForm">
-            <div class="btn-wrap">
-                <button type="submit" formaction="/prev_img">上一张</button>
-                <button type="submit" formaction="/next_img">下一张</button>
-                <button formaction="/del_img_file" class="btn-del-img" type="submit" onclick="return confirm('确认删除当前图片及其标签文件？');">删除图片+标签文件</button>
-            </div>
-        </form>
+        <div class="nav-row">
+            <form method="post" class="img-nav-bar" id="navForm">
+                <div class="btn-wrap">
+                    <button type="submit" formaction="/prev_img">上一张</button>
+                    <button type="submit" formaction="/next_img">下一张</button>
+                    <button formaction="/del_img_file" class="btn-del-img" type="submit" onclick="return confirm('确认删除当前图片及其标签文件？');">删除图片+标签文件</button>
+                </div>
+            </form>
+            <form method="post" action="/jump_img" class="jump-line">
+                <input type="number" name="jump_idx" min="1" max="{{total}}" placeholder="序号">
+                <button class="btn-jump" type="submit">跳转</button>
+            </form>
+        </div>
 
         <form method="post" action="/add_new_tag" class="add-tag-line">
             <input type="text" name="new_tag" placeholder="输入标签，添加至当前图片末尾">
@@ -1289,7 +1329,7 @@ def home():
     refresh_file_list()
     total_num = len(img_list)
     if total_num == 0:
-        return render_template_string(EDIT_HTML, img_path="", now=0, total=0, current_tags=[], tag_count={}, raw_tag_text="", mt_langs=_MT_LANGS)
+        return render_template_string(EDIT_HTML, img_path="", now=0, total=0, img_name="", current_tags=[], tag_count={}, raw_tag_text="", mt_langs=_MT_LANGS)
     tag_counter = count_all_tags_frequency()
     tag_list = get_current_tag_list()
     txt_path = get_txt_path()
@@ -1301,6 +1341,7 @@ def home():
         img_path=url_for("send_img", fname=img_list[current_idx]),
         now=current_idx + 1,
         total=total_num,
+        img_name=img_list[current_idx],
         current_tags=tag_list,
         tag_count=tag_counter,
         raw_tag_text=raw_text,
@@ -1326,6 +1367,8 @@ def edit_tag():
     tags = get_current_tag_list()
     res = [new if t == old else t for t in tags]
     txt_path = get_txt_path()
+    if not txt_path:
+        return redirect(url_for("home"))
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(", ".join(res))
     return redirect(url_for("home"))
@@ -1351,6 +1394,7 @@ def _current_image_payload():
         "idx": idx + 1,
         "total": len(img_list),
         "img_url": url_for("send_img", fname=img_list[idx]),
+        "img_name": img_list[idx],
         "tags": get_current_tag_list(),
         "tag_count": count_all_tags_frequency(),
         "raw": raw_text,
@@ -1377,10 +1421,24 @@ def next_img():
         current_idx += 1
     return redirect(url_for("home"))
 
+@app.route("/jump_img", methods=["POST"])
+def jump_img():
+    global current_idx
+    raw = request.form.get("jump_idx", "").strip()
+    try:
+        idx = int(float(raw)) - 1
+    except ValueError:
+        return redirect(url_for("home"))
+    if img_list:
+        current_idx = max(0, min(idx, len(img_list) - 1))
+    return redirect(url_for("home"))
+
 @app.route("/save_all_text", methods=["POST"])
 def save_full_text():
     text = request.form.get("full_tag_text", "").strip()
     txt_path = get_txt_path()
+    if not txt_path:
+        return redirect(url_for("home"))
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(text)
     return redirect(url_for("home"))
@@ -1392,6 +1450,8 @@ def batch_del():
     tags = get_current_tag_list()
     new_tags = [t for t in tags if t not in del_list]
     txt_path = get_txt_path()
+    if not txt_path:
+        return redirect(url_for("home"))
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(", ".join(new_tags))
     return redirect(url_for("home"))
@@ -1445,6 +1505,8 @@ def add_tag():
     if new_t not in tags:
         tags.append(new_t)
         txt_path = get_txt_path()
+        if not txt_path:
+            return redirect(url_for("home"))
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(", ".join(tags))
     return redirect(url_for("home"))
