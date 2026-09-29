@@ -85,6 +85,29 @@ TE_PREFIXES = (
 UNET_PREFIX = "lora_unet_"
 
 
+def detect_model_type(keys):
+    """区分 LoRA / 完整 checkpoint / 单独 Diffusion 模型 / VAE / ControlNet。
+    注意 model.diffusion_model / conditioner.embedders 等是两级前缀，用 startswith 匹配。"""
+    has_unet = any(k.startswith("model.diffusion_model.") for k in keys)
+    has_te = any(k.startswith("conditioner.embedders.") or k.startswith("cond_stage_model.") for k in keys)
+    has_vae = any(k.startswith("first_stage_model.") for k in keys)
+    if has_unet or has_te or has_vae:
+        return "checkpoint" if (has_unet and (has_te or has_vae)) else "diffusion"
+    if any(k.startswith("control_model.") or k.startswith("controlnet.") for k in keys):
+        return "controlnet"
+    if any(k.startswith("encoder.") for k in keys) and any(k.startswith("decoder.") for k in keys):
+        return "vae"
+    return "lora"
+
+
+_MODEL_TYPE_LABEL = {
+    "checkpoint": "Checkpoint（完整模型）",
+    "diffusion": "Diffusion 模型",
+    "controlnet": "ControlNet",
+    "vae": "VAE",
+}
+
+
 def detect_algorithm(keys):
     """根据 key 后缀推断算法类型。"""
     has_std = any(k.endswith(LORA_STD_SUFFIXES) for k in keys)
@@ -280,9 +303,18 @@ def inspect_one(path):
 
     info["num_tensors"] = len(keys)
 
-    algorithm, suffix_counter = detect_algorithm(keys)
-    info["algorithm"] = algorithm
-    info["suffix_counter"] = dict(suffix_counter) if suffix_counter else {}
+    mtype = detect_model_type(keys)
+    info["model_type"] = _MODEL_TYPE_LABEL.get(mtype, "")
+    is_lora = mtype == "lora"
+
+    if is_lora:
+        algorithm, suffix_counter = detect_algorithm(keys)
+        info["algorithm"] = algorithm
+        info["suffix_counter"] = dict(suffix_counter) if suffix_counter else {}
+    else:
+        # 完整模型类：不做 LoRA 算法 / rank 推断
+        info["algorithm"] = info["model_type"] or "unknown"
+        info["suffix_counter"] = {}
 
     # ---- 网络类型 / dim / alpha ----
     net_module = safe_get(meta, "ss_network_module") or safe_get(meta, "network_module")
@@ -302,8 +334,10 @@ def inspect_one(path):
     conv_rank_meta = to_int(safe_get(meta, "ss_network_conv_dim"))
     conv_alpha_meta = to_int(safe_get(meta, "ss_network_conv_alpha"))
 
-    with safe_open(path, framework="pt") as f:
-        rank_infer = infer_rank(f, keys, algorithm)
+    rank_infer = None
+    if is_lora:
+        with safe_open(path, framework="pt") as f:
+            rank_infer = infer_rank(f, keys, algorithm)
 
     info["rank_meta"] = rank_meta
     info["alpha_meta"] = alpha_meta
@@ -320,22 +354,37 @@ def inspect_one(path):
     submodel_counter = Counter()
     per_region_layers = defaultdict(set)
 
-    for k in keys:
-        layer_path = strip_suffix(k)
-        sub, rest = parse_submodel(layer_path)
-        submodel_counter[sub] += 1
-        if sub == "unet":
-            r = unet_region(rest)
-        elif sub in ("te", "te1", "te2"):
-            r = te_region(rest)
-        else:
-            r = "other"
-        region_counter[r] += 1
-        # 取更精细的层名
-        short = rest
-        if len(short) > 80:
-            short = short[:77] + "..."
-        per_region_layers[r].add(short)
+    if is_lora:
+        for k in keys:
+            layer_path = strip_suffix(k)
+            sub, rest = parse_submodel(layer_path)
+            submodel_counter[sub] += 1
+            if sub == "unet":
+                r = unet_region(rest)
+            elif sub in ("te", "te1", "te2"):
+                r = te_region(rest)
+            else:
+                r = "other"
+            region_counter[r] += 1
+            # 取更精细的层名
+            short = rest
+            if len(short) > 80:
+                short = short[:77] + "..."
+            per_region_layers[r].add(short)
+    else:
+        # 完整模型类：按前缀归类 UNet / TextEncoder / VAE / ControlNet
+        for k in keys:
+            if k.startswith("model.diffusion_model."):
+                r = "unet"
+            elif k.startswith("conditioner.embedders.") or k.startswith("cond_stage_model."):
+                r = "te1"
+            elif k.startswith("first_stage_model."):
+                r = "vae"
+            elif k.startswith("control_model.") or k.startswith("controlnet."):
+                r = "controlnet"
+            else:
+                r = k.split(".", 1)[0]
+            submodel_counter[r] += 1
 
     info["submodel_summary"] = dict(submodel_counter)
     info["region_summary"] = OrderedDict(sorted(region_counter.items()))
@@ -348,6 +397,19 @@ def inspect_one(path):
     info["base_model_name"] = safe_get(meta, "ss_sd_model_name")
     info["base_model_version"] = safe_get(meta, "ss_base_model_version")
     info["architecture"] = safe_get(meta, "modelspec.architecture") or safe_get(meta, "ss_v2")
+    if not info["architecture"] and mtype in ("checkpoint", "diffusion"):
+        # 无 modelspec / ss_* 时按 tensor 结构推断架构
+        if any(k.startswith("conditioner.embedders.1.") for k in keys):
+            info["architecture"] = "SDXL 系（按结构推断）"
+        elif any(k.startswith("cond_stage_model.transformer.text_model.") for k in keys):
+            try:
+                with safe_open(path, framework="pt") as f:
+                    shape = f.get_slice(
+                        "cond_stage_model.transformer.text_model.embeddings.position_embedding.weight"
+                    ).get_shape()
+                info["architecture"] = ("SD 2.x" if shape and shape[-1] == 1024 else "SD 1.x") + "（按结构推断）"
+            except Exception:
+                info["architecture"] = "SD 1.x / 2.x（按结构推断）"
     info["is_v2"] = safe_get(meta, "ss_v2")
     info["is_sdxl"] = (
         "xl" in str(info["architecture"] or "").lower()
@@ -475,6 +537,21 @@ def inspect_one(path):
     info["session_id"] = safe_get(meta, "ss_session_id")
     info["sd_scripts_commit"] = safe_get(meta, "ss_sd_scripts_commit_hash")
     info["output_name"] = safe_get(meta, "ss_output_name") or safe_get(meta, "modelspec.title")
+
+    # ---- modelspec 发布元数据（SAI/civitai 标准，checkpoint 常见）----
+    # 不依赖 kohya 训练元数据：文件里有什么就提取什么
+    ms = {}
+    for k, v in meta.items():
+        if k.startswith("modelspec.") and v not in (None, ""):
+            ms[k[len("modelspec."):]] = v
+    info["modelspec"] = ms
+    info["model_tags"] = [t.strip() for t in str(ms.get("tags", "")).split(",") if t.strip()]
+
+    # ---- 其他散装元数据（非 kohya、非 modelspec，如 current_epoch / global_step）----
+    info["misc_metadata"] = {
+        k: v for k, v in meta.items()
+        if not k.startswith(("modelspec.", "ss_"))
+    }
 
     return info
 

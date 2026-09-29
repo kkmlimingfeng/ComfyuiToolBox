@@ -265,6 +265,9 @@ PAGE = r"""<!doctype html>
   .spin { display:inline-block; width:14px; height:14px; border:2px solid #0984e3;
           border-top-color:transparent; border-radius:50%; animation:r .8s linear infinite;
           vertical-align:-2px; margin-right:6px; }
+  .longtext { font-size:12.5px; line-height:1.6; opacity:.85; background:var(--hover);
+              border-radius:8px; padding:8px 10px; margin:8px 0; max-height:150px;
+              overflow-y:auto; word-break:break-word; }
   @keyframes r { to { transform:rotate(360deg); } }
   .theme-toggle { position:fixed; bottom:20px; right:20px; font-size:24px; cursor:pointer;
                   background:transparent; border:none; padding:6px 10px; border-radius:6px;
@@ -531,6 +534,35 @@ function render(i) {
         ['基础架构', i.architecture || (i.is_sdxl ? 'SDXL' : (String(i.is_v2).toLowerCase() === 'true' ? 'SD v2' : 'SD 1.5 (?)'))],
         ['底模', i.base_model_name], ['底模版本', i.base_model_version], ['底模 hash', i.sd_model_hash]
     ]) + '</div>';
+
+    // 发布信息（modelspec 元数据：不依赖 kohya 训练数据，文件里有什么显示什么）
+    const ms = i.modelspec || {};
+    const msLabels = { title: '标题', author: '作者', date: '发布日期', license: '许可证',
+                       prediction_type: '预测类型', resolution: '分辨率' };
+    const msOrder = ['title', 'author', 'date', 'license', 'prediction_type', 'resolution'];
+    const msSkip = ['tags', 'thumbnail', 'sai_model_spec', 'implementation',
+                    'implementation_version', 'hash_sha256', 'description', 'usage_hint'];
+    const msRows = msOrder.map(k => [msLabels[k], ms[k]]);
+    Object.keys(ms).forEach(k => {
+        if (!msOrder.includes(k) && !msSkip.includes(k) && String(ms[k]).length < 160) msRows.push([k, ms[k]]);
+    });
+    let msHtml = '';
+    if (msRows.some(r => r[1])) msHtml += kv(msRows);
+    if (ms.thumbnail && String(ms.thumbnail).startsWith('data:image')) {
+        msHtml += '<img src="' + esc(ms.thumbnail) + '" alt="封面" '
+            + 'style="max-height:150px;max-width:100%;border-radius:8px;display:block;margin-top:10px">';
+    }
+    if (i.model_tags && i.model_tags.length) {
+        msHtml += '<div class="tagbar" style="max-height:none;margin-top:10px">'
+            + i.model_tags.map(t => '<span class="tg">' + esc(t) + '</span>').join('') + '</div>';
+    }
+    if (ms.description) msHtml += '<div class="longtext">' + esc(ms.description) + '</div>';
+    if (ms.usage_hint) msHtml += '<div class="longtext"><b>使用建议：</b>' + esc(ms.usage_hint) + '</div>';
+    if (msHtml) html += '<div class="sec"><h3>发布信息</h3>' + msHtml + '</div>';
+
+    if (i.misc_metadata && Object.keys(i.misc_metadata).length) {
+        html += '<div class="sec"><h3>其他元数据</h3>' + kv(Object.entries(i.misc_metadata)) + '</div>';
+    }
 
     const ddirs = (i.dataset_dirs && Object.keys(i.dataset_dirs).length)
         ? Object.entries(i.dataset_dirs)
