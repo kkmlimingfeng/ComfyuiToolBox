@@ -17,22 +17,34 @@
 
 项目提供一个统一门户，负责发现、启动、停止和切换工具；具体功能仍由各自的独立工具负责。
 
-```text
-                      ComfyUI Toolbox
-                             │
-                    ┌────────┴────────┐
-                    │   Local Portal  │
-                    │  Tool Discovery │
-                    │ Process Manager │
-                    └────────┬────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-   Tag Editor          Image Prompt          LoRA Inspect
-        │                    │                    │
-        └────────────── 独立 Flask 服务 ───────────┘
-                             │
-                       更多工具持续加入
+```mermaid
+flowchart TB
+    accTitle: ComfyUI Toolbox Architecture
+    accDescr: The unified portal discovers and manages independent tools, grouped into local tools and external web-based tools.
+
+    root["ComfyUI Toolbox"] --> portal["统一门户 Portal<br/>工具发现 · 进程管理"]
+
+    portal --> local
+    portal --> external
+
+    subgraph local["本地工具（独立 Flask 服务）"]
+        direction LR
+        editor["🏷️ 图片标签编辑器<br/>7866"]
+        img2prompt["🖼️ Krea2 提示词反推<br/>7867"]
+        lora["🔍 LoRA 参数分析<br/>7864"]
+        renamer["📂 批量文件后缀更改<br/>7865"]
+        shop["🛒 标签超市（本地）<br/>7868"]
+    end
+
+    subgraph external["外部工具（第三方网络服务）"]
+        direction LR
+        danbooru["🛒 Danbooru 标签超市<br/>在线服务"]
+    end
+
+    classDef localbox fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
+    classDef externalbox fill:#fef9c3,stroke:#ca8a04,color:#713f12
+    class local localbox
+    class external externalbox
 ```
 
 ### 设计目标
@@ -53,17 +65,21 @@
 | 🖼️ Krea2 提示词反推 | 使用本地视觉语言模型从图片生成文生图 Prompt | ✅ |
 | 🔍 LoRA 参数分析 | 查看网络算法、Rank / Alpha、训练信息及作用层级 | ✅ |
 | 📂 批量文件后缀更改 | 批量追加 / 删除文件名字符串，支持预览和防覆盖 | ✅ |
-| 🛒 Danbooru 标签超市 | 查询、组合和导出 Danbooru 标签 | ✅ |
+| 🛒 标签超市（本地） | 15 万+ 本地标签库：分类浏览、多词搜索、离线翻译、购物车组合 Prompt | ✅ |
+| 🛒 Danbooru 标签超市 | 查询、组合和导出 Danbooru 标签（第三方网络服务） | ✅ |
 
 > **后续新增工具** 会继续沿用相同的门户接入方式，因此 README 的工具表也可以按同样格式继续向下扩展。
 
-### 图片标签编辑器
+### 图片标签编辑器 
 ![图片标签编辑器](images/editor.png)
 
 ### Krea2 提示词反推
 ![Krea2 提示词反推](images/img2prompt.png)
 
-### LoRA 参数分析
+### 标签超市 (更新🌟)
+![标签超市](images/label_shop.png)
+
+### LoRA 参数分析 (更新🌟)
 ![LoRA 参数分析](images/lora-inspect.png)
 
 ### 批量文件后缀更改
@@ -162,6 +178,8 @@ tools/
 tools/
 ├── img2prompt/run.bat
 tools/
+├── label_shop/run.bat
+tools/
 ├── lora_inspect/run.bat
 tools/
 └── renamer/run.bat
@@ -209,7 +227,7 @@ run.bat
 
 ### 🔍 LoRA 参数分析
 
-读取 LoRA / LyCORIS 等模型文件中的 metadata 与网络信息，帮助快速判断模型的训练配置。
+读取 LoRA / LyCORIS / Checkpoint / Diffusion / VAE / ControlNet 等模型文件中的 metadata 与网络信息，帮助快速判断模型的训练配置。
 
 可关注：
 
@@ -219,7 +237,10 @@ run.bat
 - Base Model
 - Epoch / Step
 - Learning Rate
-- 作用层级
+- 作用层级（Unet / TextEncoder）
+- 训练标签与出现次数（kohya 训练元数据）
+- 发布信息（封面、标签、描述、许可证等 modelspec 元数据）
+- 支持离线翻译元数据内容
 
 <!-- 截图预留：docs/images/lora-detail.png -->
 
@@ -230,6 +251,23 @@ run.bat
 提供预览、跳过与防覆盖机制，避免批量重命名时误操作。
 
 <!-- 截图预留：docs/images/renamer-detail.png -->
+
+### 🛒 标签超市（本地）
+
+完全离线的本地标签库，数据来自本地收集的 Danbooru 标签集与 WD14 v2 / v3 selected_tags 并集（15 万+ 标签，含中文翻译与离线机翻）。
+
+支持：
+
+- 侧边栏两级分类（大类 → 小类）浏览
+- 多词搜索：中文 / 英文 / 别名，带不带下划线均可，空格分隔多词 AND 匹配
+- 来源筛选（danbooru / v2 / v3 交集）与使用次数过滤
+- 每个标签显示人工翻译与离线机翻（Hy-MT2 本地推理）
+- 手动编辑修正翻译、备注（实时保存）
+- 购物车：流式卡片、拖拽排序、顶部实时组合提示词字符串
+
+数据由 `tools/label_shop/build_data.py` 从原始数据集构建（含断点续跑的批量机翻），仓库直接附带成品 `tags_merged.csv`，开箱即用。
+
+<!-- 截图预留：docs/images/label_shop-detail.png -->
 
 ### 🛒 Danbooru 标签超市
 
@@ -247,7 +285,7 @@ run.bat
 
 ### Hy-MT2-1.8B
 
-用于图片标签编辑器中的本地翻译。
+用于图片标签编辑器和标签超市（本地）的离线翻译。
 
 建议放置：
 
@@ -335,10 +373,17 @@ ComfyUI-Toolbox/
     │   ├── manifest.json
     │   └── run.bat
     │
-    └── renamer/
+    ├── renamer/
+    │   ├── app.py
+    │   ├── manifest.json
+    │   └── run.bat
+    │
+    └── label_shop/
         ├── app.py
+        ├── build_data.py          # 数据构建 + 批量机翻（可选）
         ├── manifest.json
-        └── run.bat
+        ├── run.bat
+        └── tags_merged.csv        # 成品标签数据（分类 + 翻译 + 机翻）
 ```
 
 ---
@@ -432,6 +477,7 @@ if __name__ == "__main__":
 | 批量文件后缀更改 | `7865` |
 | 图片标签编辑器 | `7866` |
 | Krea2 提示词反推 | `7867` |
+| 标签超市（本地） | `7868` |
 | 新工具建议 | `7870+` |
 
 新增工具时请确保端口没有与已有服务冲突。
