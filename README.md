@@ -90,6 +90,9 @@ flowchart TB
 ### Danbooru 标签超市
 ![Danbooru 标签超市](images/danbooru.png)
 
+### Stable Diffusion法术解析
+![Stable Diffusion法术解析](images/spell_novelai.png)
+
 ---
 
 ## 🚀 Quick Start
