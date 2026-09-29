@@ -112,6 +112,14 @@ EXTERNAL_TOOLS = [
         "desc": "按 Danbooru 标签组合查询并导出提示词",
         "url": "https://tags.novelai.dev/",
     },
+    {
+        "id": "novelai_spell",
+        "group": "外部工具",
+        "name": "Stable Diffusion 法术解析",
+        "icon": "✨",
+        "desc": "Danbooru 标签联想与拼写辅助（NovelAI 官方）",
+        "url": "https://spell.novelai.dev/",
+    },
 ]
 
 

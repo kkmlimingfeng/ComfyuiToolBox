@@ -39,6 +39,7 @@ flowchart TB
     subgraph external["外部工具（第三方网络服务）"]
         direction LR
         danbooru["🛒 Danbooru 标签超市<br/>在线服务"]
+        spell["✨ Stable Diffusion 法术解析<br/>在线服务"]
     end
 
     classDef localbox fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
@@ -67,6 +68,7 @@ flowchart TB
 | 📂 批量文件后缀更改 | 批量追加 / 删除文件名字符串，支持预览和防覆盖 | ✅ |
 | 🛒 标签超市（本地） | 15 万+ 本地标签库：分类浏览、多词搜索、离线翻译、购物车组合 Prompt | ✅ |
 | 🛒 Danbooru 标签超市 | 查询、组合和导出 Danbooru 标签（第三方网络服务） | ✅ |
+| ✨ Stable Diffusion 法术解析 | NovelAI 官方 Danbooru 标签联想与拼写辅助（第三方网络服务） | ✅ |
 
 > **后续新增工具** 会继续沿用相同的门户接入方式，因此 README 的工具表也可以按同样格式继续向下扩展。
 
@@ -276,6 +278,20 @@ run.bat
 该工具依赖第三方网络服务，具体可用性受网络环境和第三方服务状态影响。
 
 <!-- 截图预留：docs/images/danbooru-detail.png -->
+
+### ✨ Stable Diffusion 法术解析
+
+NovelAI 官方的 Danbooru 标签联想与拼写辅助工具（<https://spell.novelai.dev/>）。
+
+适合用于：
+
+- 输入时自动补全 Danbooru 标签
+- 检查和纠正标签拼写
+- 快速组合图像生成提示词
+
+该工具内嵌第三方网页，无需本地部署，可用性受网络环境影响。
+
+<!-- 截图预留：docs/images/spell-detail.png -->
 
 ---
 
