@@ -1,41 +1,56 @@
 # -*- coding: utf-8 -*-
 """
 Krea2 提示词反推工具（单文件版）
-- 上传单张图片或整个文件夹，用本地 Qwen3-VL-4B-Instruct-FP8 模型反推文生图提示词（支持中文/英文，适配 FLUX.1 Krea）
-- 不依赖 vllm / llama.cpp，纯 transformers + torch
-- 首次启动把 FP8 权重反量化为 BF16 并缓存到模型目录下 _bf16_cache/，之后启动直接加载缓存（更快、内存占用更低）
-- 运行方式:
-    conda activate pytorch-study
-    python image_to_prompt.py
-- 浏览器自动打开 http://127.0.0.1:7863
+- 上传单张图片或整个文件夹，用本地 Qwen3-VL-4B-Instruct-Uncensored（GGUF）反推文生图提示词（支持中文/英文）
+- llama.cpp 推理（llama-cpp-python），主模型 + mmproj 视觉投影，自动 GPU offload
+- 模型放在统一启动器根目录 model/ 下，点击页面"加载模型"后才载入显存，卸载即释放
+- 浏览器自动打开 http://127.0.0.1:7867
 """
 
+import base64
 import gc
 import io
 import json
 import os
-import shutil
 import threading
 import time
 import traceback
 import webbrowser
 
-import torch
 from PIL import Image
 from flask import Flask, Response, jsonify, request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(BASE_DIR))  # 统一启动器根目录（脚本在 tools/img2prompt/ 下，往上两级）
-# 模型统一放在根目录的 model 文件夹
-MODEL_DIR = os.path.join(ROOT_DIR, "model", "Qwen3-VL-4B-Instruct-FP8")
-CACHE_DIR = os.path.join(MODEL_DIR, "_bf16_cache")
+MODEL_DIR = os.path.join(ROOT_DIR, "model")
+SYS_FILE = os.path.join(BASE_DIR, "system_prompt.json")   # 系统提示词持久化
 PORT = 7867
 MAX_NEW_TOKENS = 512
-DEFAULT_RES = 1536          # 默认图像长边上限：768 快 / 1024 均衡 / 1536 高清
-PROC_MAX_PIXELS = 1536 * 1536  # 处理器兜底像素上限（总像素）
+N_CTX = 8192                 # 上下文长度（需容纳图像视觉 token + 提示词 + 输出）
+DEFAULT_RES = 1536           # 默认图像长边上限：768 快 / 1024 均衡 / 1536 高清
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+# 可选视觉模型（主模型 + mmproj 视觉投影，均放在统一启动器/model/ 下）
+MODELS = {
+    "qwen3vl4b": {
+        "label": "Qwen3-VL-4B Uncensored · Q4_K_M（≈3.2G 显存）",
+        "model": "Qwen3-VL-4B-Instruct-Uncensored.Q4_K_M.gguf",
+        "mmproj": "Qwen3-VL-4B-Instruct-Uncensored.mmproj-f16.gguf",
+    },
+    "qwen327b": {
+        "label": "Qwen3.8-27B · IQ3_XS（≈13G 显存）",
+        "model": "Qwen3.8-27B-IQ3_XS.gguf",
+        "mmproj": "mmproj-Qwen3.8-27B-BF16.gguf",
+    },
+}
+DEFAULT_MODEL = "qwen3vl4b"
+
+DEFAULT_SYS_PROMPT = (
+    "You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels "
+    "at deeply understanding and richly describing images, scenes, and any visual content. "
+    "Follow the user's instructions exactly and answer in the same language as the user's request."
+)
+
+DEVICE = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") != "-1" else "cpu"
 
 # INSTRUCTION_ZH = (
 #     "分析这张图片，并将其转换为适合直接用于图像生成的高密度中文提示词。首先概括图片的媒介、视觉风格或艺术表现形式，"
@@ -79,141 +94,129 @@ INSTRUCTIONS = {"zh": INSTRUCTION_ZH, "en": INSTRUCTION_EN}
 # ---------------------------------------------------------------- 模型加载 ---
 
 _model = None
-_processor = None
-_state = {"status": "unloaded", "device": DEVICE, "error": None}  # 模型默认不自动加载
-_infer_lock = threading.Lock()
-_model_op_lock = threading.Lock()  # 串行化 加载/卸载 操作
+_state = {"status": "unloaded",
+          "device": "GPU（llama.cpp 自动 offload）" if DEVICE == "cuda" else "CPU",
+          "model": None, "error": None}  # 模型默认不自动加载
+_infer_lock = threading.Lock()      # llama.cpp 同一上下文不支持并发推理，必须串行化
+_model_op_lock = threading.Lock()   # 串行化 加载/卸载 操作
+
+# ---- 系统提示词（可在线编辑，持久化到 system_prompt.json）----
+_sys_prompt = DEFAULT_SYS_PROMPT
 
 
-def _dequant_block_fp8(w_fp8, scale):
-    """FP8 块缩放(128x128) -> BF16。按行块分块处理，避免 fp32 全尺寸中间张量撑爆内存。"""
-    n_ob, n_ib = scale.shape
-    in_d = w_fp8.shape[1]
-    rows = []
-    for i in range(n_ob):
-        blk = w_fp8[i * 128:(i + 1) * 128].to(torch.float32)          # [128, in_d]
-        blk *= scale[i].repeat_interleave(in_d // n_ib)[None, :]
-        rows.append(blk.to(torch.bfloat16))
-    return torch.cat(rows, dim=0)
-
-
-def _build_bf16_cache(model_dir, cache_dir):
-    """把 FP8 checkpoint 反量化为 BF16 并保存到磁盘缓存，返回缓存目录。"""
-    import safetensors.torch
-
-    marker = os.path.join(cache_dir, ".complete")
-    if os.path.isfile(marker):
-        return cache_dir
-    if os.path.isdir(cache_dir):
-        shutil.rmtree(cache_dir)  # 上次可能中途失败，清掉重建
-    os.makedirs(cache_dir)
-
-    t0 = time.time()
-    print("[model] 首次运行：正在把 FP8 权重反量化为 BF16 并缓存（约 1-3 分钟，之后启动会快很多）...")
-    with open(os.path.join(model_dir, "model.safetensors.index.json"), "r", encoding="utf-8") as f:
-        index = json.load(f)
-    shards = sorted(set(index["weight_map"].values()))
-
-    for shard in shards:
-        sd = safetensors.torch.load_file(os.path.join(model_dir, shard))
-        out = {}
-        for name, tensor in sd.items():
-            if name.endswith(".weight_scale_inv") or name.endswith(".weight_scale"):
-                continue
-            if tensor.dtype == torch.float8_e4m3fn:
-                scale_key = name[: -len(".weight")] + ".weight_scale_inv"
-                if scale_key not in sd:
-                    raise RuntimeError(f"找不到 {scale_key} 的缩放系数")
-                out[name] = _dequant_block_fp8(tensor, sd[scale_key].to(torch.float32))
-            elif tensor.is_floating_point():
-                out[name] = tensor.to(torch.bfloat16)
-            else:
-                out[name] = tensor
-        safetensors.torch.save_file(out, os.path.join(cache_dir, shard), metadata={"format": "pt"})
-        del sd, out
-
-    # 写入去掉量化配置的 config.json，并复制其余小文件，让缓存目录自成完整模型
-    index["weight_map"] = {k: v for k, v in index["weight_map"].items()
-                           if not k.endswith(".weight_scale_inv")
-                           and not k.endswith(".weight_scale")}
-    with open(os.path.join(cache_dir, "model.safetensors.index.json"), "w", encoding="utf-8") as f:
-        json.dump(index, f)
-    with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    cfg.pop("quantization_config", None)
-    with open(os.path.join(cache_dir, "config.json"), "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    for fname in ("generation_config.json", "tokenizer.json", "tokenizer_config.json",
-                  "vocab.json", "chat_template.json", "preprocessor_config.json",
-                  "video_preprocessor_config.json"):
-        src = os.path.join(model_dir, fname)
-        if os.path.isfile(src):
-            shutil.copy2(src, os.path.join(cache_dir, fname))
-    with open(marker, "w", encoding="utf-8") as f:
-        f.write("ok")
-    print(f"[model] BF16 缓存完成，耗时 {time.time() - t0:.0f}s -> {cache_dir}")
-    return cache_dir
-
-
-def load_model():
-    global _model, _processor
+def _load_sys_prompt():
+    global _sys_prompt
     try:
+        if os.path.isfile(SYS_FILE):
+            with open(SYS_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d.get("prompt"), str) and d["prompt"].strip():
+                _sys_prompt = d["prompt"]
+    except Exception as e:
+        print(f"[sys] 读取系统提示词失败: {e}")
+
+
+def _save_sys_prompt():
+    try:
+        with open(SYS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"prompt": _sys_prompt}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[sys] 保存系统提示词失败: {e}")
+
+
+_load_sys_prompt()
+
+
+# ---- 显存查询（NVML，不依赖 torch）----
+_nvml = None
+_nvml_tried = False
+
+
+def _nvml_mem():
+    """返回 (used_gb, free_gb) 或 None。"""
+    global _nvml, _nvml_tried
+    try:
+        if not _nvml_tried:
+            _nvml_tried = True
+            import ctypes
+            import ctypes.util
+            path = ctypes.util.find_library("nvml")
+            for cand in (path, r"C:\Windows\System32\nvml.dll",
+                         r"C:\Program Files\NVIDIA Corporation\NVSMI\nvml.dll"):
+                if cand and os.path.isfile(cand):
+                    _nvml = ctypes.WinDLL(cand)
+                    _nvml.nvmlInit_v2()
+                    break
+        if not _nvml:
+            return None
+
+        class _Mem(ctypes.Structure):
+            _fields_ = [("total", ctypes.c_ulonglong),
+                        ("free", ctypes.c_ulonglong),
+                        ("used", ctypes.c_ulonglong)]
+
+        h = ctypes.c_void_p()
+        if _nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(h)) != 0:
+            return None
+        m = _Mem()
+        if _nvml.nvmlDeviceGetMemoryInfo(h, ctypes.byref(m)) != 0:
+            return None
+        return m.used / 1024**3, m.free / 1024**3
+    except Exception:
+        _nvml = None
+        return None
+
+
+def load_model(key):
+    global _model
+    try:
+        m = MODELS.get(key)
+        if not m:
+            raise ValueError(f"未知模型: {key}")
+        model_path = os.path.join(MODEL_DIR, m["model"])
+        mmproj_path = os.path.join(MODEL_DIR, m["mmproj"])
+        for p in (model_path, mmproj_path):
+            if not os.path.isfile(p):
+                raise FileNotFoundError(f"缺少模型文件: {p}")
         t0 = time.time()
-        print(f"[model] device={DEVICE} ...")
+        print(f"[model] device={DEVICE} loading {m['model']} ...")
 
-        from transformers import AutoProcessor
+        from llama_cpp import Llama
 
-        try:
-            from transformers import Qwen3VLForConditionalGeneration as ModelCls
-        except ImportError:
-            from transformers import AutoModelForImageTextToText as ModelCls
-
-        cache_dir = _build_bf16_cache(MODEL_DIR, CACHE_DIR)
-
-        # device_map 流式加载：逐张量上卡，内存峰值低
-        _model = ModelCls.from_pretrained(
-            cache_dir,
-            dtype=DTYPE,
-            device_map={"": 0 if DEVICE == "cuda" else "cpu"},
-            attn_implementation="sdpa",
+        _model = Llama(
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            n_gpu_layers=-1,      # 全部层 offload 到 GPU
+            n_ctx=N_CTX,
+            flash_attn=(DEVICE == "cuda"),
+            verbose=False,
         )
-        _model.eval()
-
-        # 关键：Qwen3-VL 处理器以 size.longest_edge 为像素上限（默认 1677 万！，
-        # 传 max_pixels 不生效）。必须用 size 覆盖，否则大图会产生近万视觉 token 直接 OOM
-        _processor = AutoProcessor.from_pretrained(
-            MODEL_DIR,
-            size={"shortest_edge": 32 * 32, "longest_edge": PROC_MAX_PIXELS},
-        )
-
+        _state["model"] = key
         _state["status"] = "ready"
-        vram = (f", VRAM={torch.cuda.memory_allocated() / 1024**3:.1f}GB"
-                if DEVICE == "cuda" else "")
-        print(f"[model] 就绪，耗时 {time.time() - t0:.1f}s{vram}")
+        print(f"[model] 就绪，耗时 {time.time() - t0:.1f}s")
     except Exception as e:
         _state["status"] = "error"
+        _state["model"] = None
         _state["error"] = f"{e.__class__.__name__}: {e}"
         traceback.print_exc()
 
 
 def unload_model():
     """卸载模型，释放显存，方便切去 ComfyUI 等其他程序。"""
-    global _model, _processor
+    global _model
     with _model_op_lock:
         if _state["status"] != "ready":
             return False, f"当前状态为 {_state['status']}，无需卸载"
         with _infer_lock:  # 等当前推理跑完再卸
             _model = None
-            _processor = None
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         _state["status"] = "unloaded"
+        _state["model"] = None
         print("[model] 已卸载，显存已释放")
         return True, "已卸载，显存已释放"
 
 
-def start_load():
+def start_load(key):
     """后台线程重新加载模型。"""
     if _state["status"] in ("loading", "ready"):
         return False, f"当前状态为 {_state['status']}，无需加载"
@@ -222,47 +225,46 @@ def start_load():
             return False, f"当前状态为 {_state['status']}，无需加载"
         _state["status"] = "loading"
         _state["error"] = None
-    threading.Thread(target=load_model, daemon=True).start()
+    threading.Thread(target=load_model, args=(key,), daemon=True).start()
     return True, "开始加载模型"
 
 
 # ---------------------------------------------------------------- 推理 ---
 
-def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int = DEFAULT_RES) -> str:
+def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int = DEFAULT_RES,
+                  max_tokens: int = MAX_NEW_TOKENS) -> str:
     pil_img = pil_img.convert("RGB")
     if max(pil_img.size) > max_side:
         pil_img.thumbnail((max_side, max_side))  # 长边缩放，控制视觉 token 数量
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image", "image": pil_img},
-            {"type": "text", "text": INSTRUCTIONS.get(lang, INSTRUCTION_ZH)},
-        ],
-    }]
-    inputs = _processor.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-    ).to(_model.device)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-    with torch.inference_mode():
-        out = _model.generate(
-            **inputs,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=True,
-            temperature=0.3,   # 低温采样：接近确定结果，又避免贪心解码死循环跑满 token
-            top_p=0.8,
-            top_k=20,
-        )
-    text = _processor.batch_decode(
-        out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
-    )[0].strip()
+    messages = [
+        {"role": "system", "content": _sys_prompt},
+        {"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            {"type": "text", "text": INSTRUCTIONS.get(lang, INSTRUCTION_ZH)},
+        ]},
+    ]
+    t0 = time.time()
+    resp = _model.create_chat_completion(
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0.3,   # 低温采样：接近确定结果，又避免贪心解码死循环跑满 token
+        top_p=0.8,
+        top_k=20,
+    )
+    sec = time.time() - t0
+    usage = resp.get("usage") or {}
+    n_tok = usage.get("completion_tokens") or 0
+    stats = {"sec": round(sec, 1), "tokens": n_tok,
+             "tps": round(n_tok / sec, 1) if sec > 0 else 0.0}
+    text = (resp["choices"][0]["message"].get("content") or "").strip()
     # 保险：去掉可能出现的思考块和引号
     if "</think>" in text:
         text = text.split("</think>", 1)[1].strip()
-    return text.strip('"').strip()
+    return text.strip('"').strip(), stats
 
 
 # ---------------------------------------------------------------- Flask ---
@@ -317,12 +319,13 @@ PAGE = r"""<!doctype html>
           color:var(--muted); cursor:pointer; transition:.15s; }
   #drop.over { border-color:#6ea8fe; background:var(--card); }
   #drop b { color:var(--text); }
-  .btns { display:flex; gap:10px; margin-top:14px; }
   button { background:var(--btn); color:var(--btn-text); border:1px solid var(--btn-border);
-           padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; }
+           padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; white-space:nowrap; }
   button:hover { background:var(--btn-hover); }
   button.primary { background:#2f6feb; border-color:#2f6feb; color:#fff; }
   button.primary:disabled { opacity:.4; cursor:not-allowed; }
+  .btns { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; align-items:center; }
+  .btns > span { white-space:nowrap; }
   .sel { background:var(--btn); color:var(--btn-text); border:1px solid var(--btn-border);
          border-radius:6px; padding:4px 8px; font-size:13px; }
   #stats { margin:14px 0 8px; font-size:13px; color:var(--muted); }
@@ -339,6 +342,15 @@ PAGE = r"""<!doctype html>
               flex:1; font-family:inherit; }
   .card .ops { display:flex; gap:8px; }
   .card .ops button { padding:4px 12px; font-size:12px; }
+  .syscard { background:var(--card); border:1px solid var(--border); border-radius:12px;
+             padding:12px; margin-top:16px; }
+  .syshead { display:flex; justify-content:space-between; align-items:center; gap:10px;
+             font-size:13px; color:var(--muted); margin-bottom:8px; flex-wrap:wrap; }
+  .syshead button { padding:4px 12px; font-size:12px; }
+  #sysText { width:100%; box-sizing:border-box; min-height:150px; resize:vertical;
+             background:var(--inner); color:var(--text); border:1px solid var(--btn-border);
+             border-radius:8px; padding:10px; font-size:13px; line-height:1.5;
+             font-family:inherit; }
   .theme-toggle { position:fixed; bottom:20px; right:20px; font-size:24px; cursor:pointer;
                   background:transparent; border:none; padding:6px 10px; border-radius:6px;
                   transition:background .2s; z-index:999; }
@@ -349,12 +361,15 @@ PAGE = r"""<!doctype html>
 <body>
 <div class="wrap">
   <h1>Krea2提示词反推 <span id="badge" class="unloaded">模型未加载</span></h1>
-  <div class="sub">Qwen3-VL-4B-Instruct-FP8 本地推理 · 反推文生图提示词（Krea-2）</div>
+  <div class="sub">GGUF 视觉模型（llama.cpp）本地推理 · 反推文生图提示词 · 可切换模型与系统提示词</div>
 
 
   <div class="btns" style="margin-bottom:14px;">
     <button id="btnLoad">加载模型</button>
     <button id="btnUnload">卸载模型（释放显存）</button>
+    <span style="align-self:center;font-size:13px;color:var(--muted);">模型：
+      <select id="modelSel" class="sel"></select>
+    </span>
   </div>
 
   <div id="drop">将图片或文件夹拖到这里，或点击选择</div>
@@ -375,6 +390,15 @@ PAGE = r"""<!doctype html>
         <option value="1536" selected>1536（高清）</option>
       </select>
     </span>
+    <span style="align-self:center;font-size:13px;color:var(--muted);">最大输出长度：
+      <select id="maxtSel" class="sel">
+        <option value="512">512</option>
+        <option value="768">768</option>
+        <option value="1024" selected>1024</option>
+        <option value="1536">1536</option>
+        <option value="2048">2048</option>
+      </select>
+    </span>
   </div>
   <input type="file" id="fileInput" multiple accept="image/*" hidden>
   <input type="file" id="dirInput" webkitdirectory multiple hidden>
@@ -382,6 +406,17 @@ PAGE = r"""<!doctype html>
   <div id="list"></div>
   <div class="btns">
     <button id="download">下载全部结果 (.txt)</button>
+  </div>
+
+  <div class="syscard">
+    <div class="syshead">
+      <span>系统提示词（模型人设，每次反推都会生效，切换模型共用）</span>
+      <span>
+        <button id="sysSave">保存</button>
+        <button id="sysReset">恢复默认</button>
+      </span>
+    </div>
+    <textarea id="sysText" spellcheck="false"></textarea>
   </div>
 </div>
 <button class="theme-toggle" id="themeBtn">💡</button>
@@ -422,8 +457,8 @@ async function poll() {
     const r = await fetch('/api/status'); const s = await r.json();
     const b = $('badge');
     if (s.status === 'ready') {
-      b.textContent = '模型就绪 · 显存 ' + (s.vram != null ? s.vram + 'G' : '?')
-                    + (s.free_vram != null ? ' · 空闲 ' + s.free_vram + 'G' : '');
+      b.textContent = '模型就绪' + (s.vram != null ? ' · 显存 ' + s.vram + 'G · 空闲 ' + s.free + 'G' : '')
+                    + (s.model && $('modelSel').selectedOptions[0] ? '（' + $('modelSel').selectedOptions[0].text.split('（')[0] + '）' : '');
       b.className = 'ready'; b.title = '';
     } else if (s.status === 'error') {
       b.textContent = '加载失败（可重试）'; b.className = 'error'; b.title = s.error;
@@ -432,16 +467,65 @@ async function poll() {
     } else {
       b.textContent = '模型加载中…'; b.className = 'loading';
     }
+    if (s.model) $('modelSel').value = s.model;
+    $('modelSel').disabled = (s.status !== 'unloaded');  // 需先卸载才能切换模型
     $('btnLoad').disabled = (s.status === 'loading' || s.status === 'ready');
     $('btnUnload').disabled = (s.status !== 'ready');
   } catch (e) {}
 }
 setInterval(poll, 1500); poll();
 
+// ---- 模型下拉初始化 ----
+(async function initModels() {
+  try {
+    const r = await fetch('/api/models'); const j = await r.json();
+    const sel = $('modelSel'); sel.innerHTML = '';
+    for (const [k, m] of Object.entries(j.models)) {
+      const o = document.createElement('option'); o.value = k; o.textContent = m.label;
+      sel.appendChild(o);
+    }
+    if (j.current) sel.value = j.current; else sel.value = j.default;
+    sel.disabled = (j.status !== 'unloaded');
+  } catch (e) {}
+})();
+
+// ---- 系统提示词 ----
+(async function initSys() {
+  try {
+    const r = await fetch('/api/system_prompt'); const j = await r.json();
+    $('sysText').value = j.prompt;
+  } catch (e) {}
+})();
+$('sysSave').onclick = async () => {
+  const btn = $('sysSave');
+  try {
+    const r = await fetch('/api/system_prompt', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: $('sysText').value }) });
+    const j = await r.json();
+    btn.textContent = j.ok ? '已保存' : '保存失败';
+    if (j.ok) $('sysText').value = j.prompt;
+  } catch (e) { btn.textContent = '保存失败'; }
+  setTimeout(() => btn.textContent = '保存', 1200);
+};
+$('sysReset').onclick = async () => {
+  const btn = $('sysReset');
+  try {
+    const r = await fetch('/api/system_prompt', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reset: true }) });
+    const j = await r.json();
+    if (j.ok) $('sysText').value = j.prompt;
+    btn.textContent = j.ok ? '已恢复' : '失败';
+  } catch (e) { btn.textContent = '失败'; }
+  setTimeout(() => btn.textContent = '恢复默认', 1200);
+};
+
 // ---- 加载 / 卸载模型 ----
 $('btnLoad').onclick = async () => {
   $('btnLoad').disabled = true;
-  await fetch('/api/load', { method: 'POST' });
+  await fetch('/api/load', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: $('modelSel').value }) });
   poll();
 };
 $('btnUnload').onclick = async () => {
@@ -512,7 +596,10 @@ function render() {
     const st = document.createElement('div'); st.className = 'status';
     if (it.status === 'pending') st.textContent = '排队中…';
     else if (it.status === 'running') st.textContent = '反推中…';
-    else if (it.status === 'done') st.textContent = '完成';
+    else if (it.status === 'done') {
+      const s2 = it.stats;
+      st.textContent = '完成' + (s2 ? ' · ' + s2.sec + 's · ' + s2.tokens + ' tok · ' + s2.tps + ' tok/s' : '');
+    }
     else { st.textContent = '失败: ' + it.error; st.className = 'status err'; }
     pre.textContent = it.prompt;
     body.append(name, st, pre);
@@ -546,13 +633,14 @@ function pump() {
   const fd = new FormData(); fd.append('image', next.file, next.file.name);
   fd.append('lang', $('langSel').value);
   fd.append('res', $('resSel').value);
+  fd.append('maxt', $('maxtSel').value);
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 300000);  // 单张 5 分钟超时，防止假死卡住队列
   fetch('/api/infer', { method: 'POST', body: fd, signal: ctl.signal })
     .then(r => r.json().then(j => ({ ok: r.ok, j })))
     .then(({ ok, j }) => {
       updateById(next.id, ok && j.ok
-        ? { status: 'done', prompt: j.prompt }
+        ? { status: 'done', prompt: j.prompt, stats: j.stats || null }
         : { status: 'error', error: (j && j.error) || ('HTTP ' + ok) });
       doneCount++;
     })
@@ -585,19 +673,28 @@ def index():
 @app.get("/api/status")
 def status():
     s = dict(_state)
-    if DEVICE == "cuda":
-        s["torch_allocated"] = round(torch.cuda.memory_allocated() / 1024**3, 2)
-        s["torch_reserved"] = round(torch.cuda.memory_reserved() / 1024**3, 2)
-        free_b, _total = torch.cuda.mem_get_info()
-        s["free_vram"] = round(free_b / 1024**3, 1)
-        if _state["status"] == "ready":
-            s["vram"] = s["torch_allocated"]
+    mem = _nvml_mem()
+    if mem:
+        s["vram"] = round(mem[0], 1)   # 全机已用显存
+        s["free"] = round(mem[1], 1)   # 全机空闲显存
     return jsonify(s)
+
+
+@app.get("/api/models")
+def api_models():
+    return jsonify({"ok": True, "models": MODELS, "current": _state.get("model"),
+                    "default": DEFAULT_MODEL, "status": _state["status"]})
 
 
 @app.post("/api/load")
 def api_load():
-    ok, msg = start_load()
+    data = request.get_json(silent=True) or {}
+    key = data.get("model") or DEFAULT_MODEL
+    if key not in MODELS:
+        return jsonify({"ok": False, "message": f"未知模型: {key}"}), 400
+    if _state["status"] == "ready" and _state.get("model") != key:
+        unload_model()  # 切换模型：先释放当前模型再加载新的
+    ok, msg = start_load(key)
     return jsonify({"ok": ok, "message": msg})
 
 
@@ -605,6 +702,26 @@ def api_load():
 def api_unload():
     ok, msg = unload_model()
     return jsonify({"ok": ok, "message": msg})
+
+
+@app.get("/api/system_prompt")
+def api_get_sys():
+    return jsonify({"ok": True, "prompt": _sys_prompt, "default": DEFAULT_SYS_PROMPT})
+
+
+@app.post("/api/system_prompt")
+def api_set_sys():
+    global _sys_prompt
+    data = request.get_json(silent=True) or {}
+    if data.get("reset"):
+        _sys_prompt = DEFAULT_SYS_PROMPT
+    else:
+        p = (data.get("prompt") or "").strip()
+        if not p:
+            return jsonify({"ok": False, "error": "系统提示词不能为空"}), 400
+        _sys_prompt = p
+    _save_sys_prompt()
+    return jsonify({"ok": True, "prompt": _sys_prompt})
 
 
 @app.post("/api/infer")
@@ -627,37 +744,29 @@ def infer():
 
     with _infer_lock:  # GPU 串行
         try:
-            if DEVICE == "cuda":
-                free_b, _ = torch.cuda.mem_get_info()
-                if free_b < 2.5 * 1024**3:
-                    return jsonify({"ok": False,
-                                    "error": f"显存空闲仅 {free_b / 1024**3:.1f}G，不够安全推理，"
-                                             "硬跑会溢出到内存导致假死；请先释放显存"
-                                             "（如在 ComfyUI 里卸载模型）再试"}), 503
             try:
                 res = int(request.form.get("res", DEFAULT_RES))
             except ValueError:
                 res = DEFAULT_RES
             res = max(512, min(res, 4096))
-            prompt = analyze_image(pil, request.form.get("lang", "zh"), res)
-        except torch.cuda.OutOfMemoryError:
-            return jsonify({"ok": False,
-                            "error": "显存不足(OOM)，请关闭其他占用显存的程序（如 ComfyUI）后重试"}), 500
+            try:
+                maxt = int(request.form.get("maxt", MAX_NEW_TOKENS))
+            except ValueError:
+                maxt = MAX_NEW_TOKENS
+            maxt = max(128, min(maxt, 4096))
+            prompt, stats = analyze_image(pil, request.form.get("lang", "zh"), res, maxt)
         except Exception as e:
             traceback.print_exc()
             return jsonify({"ok": False, "error": f"{e.__class__.__name__}: {e}"}), 500
-        finally:
-            # 每次推理后清掉缓存块：不同图片缩放尺寸不同会碎片化缓存，
-            # 累积后会导致下一张分配失败（表现为卡死、显存暴涨）
-            if DEVICE == "cuda":
-                torch.cuda.empty_cache()
-    return jsonify({"ok": True, "prompt": prompt})
+    return jsonify({"ok": True, "prompt": prompt, "stats": stats})
 
 
 # ---------------------------------------------------------------- 入口 ---
 
 if __name__ == "__main__":
     print(f"[app] model dir: {MODEL_DIR}")
+    for k, m in MODELS.items():
+        print(f"[app]   - {k}: {m['model']}")
     # 模型不再启动时自动加载，等用户在页面上点"加载模型"再载入（省显存）
     print(f"[app] model will NOT auto-load; click the load button on the page when needed")
 

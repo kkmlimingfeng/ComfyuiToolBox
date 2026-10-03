@@ -1,0 +1,10 @@
+# 原始数据集（tags_merged.csv 已含全部合并结果，无需再分发原始数据）
+files/
+
+# 备份 / 生成物 / 运行时缓存
+tags_merged.csv.bak
+tags_merged_classified.csv
+_cls_cache.json
+_mt_progress.json
+__pycache__/
+*.pyc

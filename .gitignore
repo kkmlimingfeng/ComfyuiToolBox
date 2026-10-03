@@ -1,0 +1,27 @@
+# 内置 Python 解释器（体积大，按 README 自行准备）
+python/
+
+# AI 模型文件（约 20GB，自动/手动下载到本地）
+model/
+
+# llama-cpp-python GPU 预编译包（286MB，超 GitHub 单文件限制，走 Release）
+*.whl
+
+# 测试用的大模型样例
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+
+# 运行时生成
+logs/
+__pycache__/
+*.pyc
+tools/**/last_path.txt
+tools/**/debug.log
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
