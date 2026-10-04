@@ -66,7 +66,7 @@ flowchart TB
 | 🖼️ Krea2 提示词反推 | 使用本地视觉语言模型从图片生成文生图 Prompt | ✅ |
 | 🔍 LoRA 参数分析 | 查看网络算法、Rank / Alpha、训练信息及作用层级 | ✅ |
 | 📂 批量文件后缀更改 | 批量追加 / 删除文件名字符串，支持预览和防覆盖 | ✅ |
-| 🛒 标签超市（本地） | 15 万+ 本地标签库：分类浏览、多词搜索、离线翻译、购物车组合 Prompt | ✅ |
+| 🛒 标签超市（本地） | 15 万+ 本地标签库：分类浏览、多词搜索、离线翻译、购物车组合 Prompt、多数据源 CSV 切换 | ✅ |
 | 🛒 Danbooru 标签超市 | 查询、组合和导出 Danbooru 标签（第三方网络服务） | ✅ |
 | ✨ Stable Diffusion 法术解析 | NovelAI 官方 Danbooru 标签联想与拼写辅助（第三方网络服务） | ✅ |
 
@@ -269,8 +269,12 @@ run.bat
 - 每个标签显示人工翻译与离线机翻（Hy-MT2 本地推理）
 - 手动编辑修正翻译、备注（实时保存）
 - 购物车：流式卡片、拖拽排序、顶部实时组合提示词字符串
+- 多数据源切换：顶栏下拉框可在 `tags_merged*.csv` 之间即时切换（编辑写回当前选中的文件）
 
-数据由 `tools/label_shop/build_data.py` 从原始数据集构建（含断点续跑的批量机翻），仓库直接附带成品 `tags_merged.csv`，开箱即用。
+数据由 `tools/label_shop/build_data.py` 从原始数据集构建（含断点续跑的批量机翻），仓库直接附带成品数据，开箱即用：
+
+- `tags_merged.csv`：基础版（分类 + 翻译 + 机翻）
+- `tags_merged_fill.csv`：全量补翻版（15.2 万行中文翻译无空白，画师名统一标注「画师」），可在页面顶栏切换使用
 
 <!-- 截图预留：docs/images/label_shop-detail.png -->
 
@@ -404,7 +408,8 @@ ComfyUI-Toolbox/
         ├── build_data.py          # 数据构建 + 批量机翻（可选）
         ├── manifest.json
         ├── run.bat
-        └── tags_merged.csv        # 成品标签数据（分类 + 翻译 + 机翻）
+        ├── tags_merged.csv        # 成品标签数据（分类 + 翻译 + 机翻）
+        └── tags_merged_fill.csv   # 全量补翻版（zh 无空白，画师名统一标注）
 ```
 
 ---
