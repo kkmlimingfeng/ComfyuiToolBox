@@ -261,21 +261,26 @@ def _norm(s):
 _LOCK = threading.Lock()
 _TAGS = None      # [{n, zh, mt, c, cat, sub, a, db, v2, v3, note, sn(list), sz}]
 _STATS = None     # {大类: {小类: n}}
-_MERGED_MODE = False   # True = 数据来自 tags_merged.csv，编辑可写回
+_MERGED_MODE = False   # True = 数据来自 tags_merged*.csv，编辑可写回
+_CURRENT_CSV = MERGED_CSV   # 当前数据源 CSV（页面可切换；编辑写回当前文件）
+_RELOAD = False             # True = 下次 load_tags 强制重新加载（切换数据源用）
 
 
 def load_tags():
     """优先加载 build_data.py 产出的 tags_merged.csv（含机翻）；
-    不存在时从 files/ 三份原始数据现场合并分类（无机翻列）"""
-    global _TAGS, _STATS, _MERGED_MODE
+    不存在时从 files/ 三份原始数据现场合并分类（无机翻列）。
+    _RELOAD 置位时强制重载（/api/switch_csv 切换数据源用）"""
+    global _TAGS, _STATS, _MERGED_MODE, _RELOAD
     with _LOCK:
-        if _TAGS is not None:
+        if _TAGS is not None and not _RELOAD:
             return
+        _RELOAD = False
+        _TAGS = None
         t0 = time.time()
 
-        if os.path.isfile(MERGED_CSV):
+        if os.path.isfile(_CURRENT_CSV):
             tags = []
-            with open(MERGED_CSV, encoding="utf-8-sig", errors="replace") as f:
+            with open(_CURRENT_CSV, encoding="utf-8-sig", errors="replace") as f:
                 for r in csv.DictReader(f):
                     src = r.get("sources") or ""
                     try:
@@ -318,6 +323,7 @@ def load_tags():
                 stats[t["cat"]][t["sub"] or ""] += 1
             _STATS = stats
             _MERGED_MODE = True   # merged CSV 为数据源，允许编辑写回
+            print(f"[load] 数据源: {os.path.basename(_CURRENT_CSV)} 共 {len(tags)} 条，耗时 {time.time()-t0:.1f}s")
             return
 
         wd = {}  # {tag: {ver: (category, count)}}；WD14 v2 的 name 用空格分隔，统一换成下划线
@@ -589,6 +595,8 @@ PAGE = r"""<!doctype html>
   .srcbtn.sv2.on { background:#0a9d58; border-color:#0a9d58; color:#fff; opacity:1; border-style:solid; }
   .srcbtn.sv3.on { background:#e67e22; border-color:#e67e22; color:#fff; opacity:1; border-style:solid; }
   .srcnote { font-size:12px; color:var(--muted); margin-left:2px; }
+  .csvsel { padding:8px 10px; border-radius:8px; border:1px solid var(--border);
+            background:var(--bg); color:var(--text); font-size:13px; max-width:230px; }
 </style>
 </head>
 <body class="light">
@@ -602,6 +610,7 @@ PAGE = r"""<!doctype html>
       <button class="srcbtn sv3 on" id="src_v3" onclick="toggleSrc('v3')" title="要求标签包含 WD14 v3 来源（交集，可多选；全灭=不过滤）">v3</button>
       <span class="srcnote" id="srcnote" style="display:none">不过滤</span>
     </span>
+    <select id="csvsel" class="csvsel" title="切换数据源 CSV；编辑卡片会写回当前选中的文件" onchange="switchCsv(this.value)"></select>
   </div>
   <div id="cnt" class="cnt" style="display:none"></div>
   <div class="wrap">
@@ -952,6 +961,29 @@ document.addEventListener('keydown', e => {
 });
 
 renderCartN(); renderCart();
+
+// ---------- 数据源 CSV 切换 ----------
+async function loadCsvList() {
+    const r = await fetch('/api/csv_list'); const d = await r.json();
+    if (!d.ok) return;
+    const sel = document.getElementById('csvsel');
+    sel.innerHTML = d.files.map(f =>
+        '<option value="' + esc(f) + '"' + (f === d.current ? ' selected' : '') + '>' + esc(f) + '</option>').join('');
+}
+async function switchCsv(f) {
+    if (!f) return;
+    toast('正在切换数据源…');
+    const r = await fetch('/api/switch_csv', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: f })
+    });
+    const d = await r.json();
+    if (!d.ok) { toast('切换失败：' + (d.error || '未知错误')); return; }
+    if (d.same) { toast('当前已是该数据源'); return; }
+    toast('已切换：' + f + '（共 ' + d.total.toLocaleString() + ' 条，编辑将写回该文件）');
+    loadCats().then(() => doSearch(true));
+}
+loadCsvList();
 loadCats().then(() => doSearch(true));   // 默认展示热门标签
 </script>
 </body>
@@ -962,12 +994,12 @@ loadCats().then(() => doSearch(true));   // 默认展示热门标签
 # ---------------- 接口 ----------------
 
 def save_merged():
-    """把内存 _TAGS 写回 tags_merged.csv（列结构与 build_data.py 完全一致）。
+    """把内存 _TAGS 写回当前数据源 CSV（列结构与 build_data.py 完全一致）。
     原子写（pid.tmp + os.replace）；调用方不要持有 _LOCK（本函数不加锁，
     CPython 下读列表字段安全，单人工具无并发编辑冲突）。"""
     if not _MERGED_MODE or _TAGS is None:
         return False
-    tmp = f"{MERGED_CSV}.{os.getpid()}.tmp"
+    tmp = f"{_CURRENT_CSV}.{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["name", "count", "cat", "sub", "zh", "zh_mt", "aliases", "sources", "note"])
@@ -975,8 +1007,36 @@ def save_merged():
             src = ",".join([k for k, on in (("db", t["db"]), ("v2", t["v2"]), ("v3", t["v3"])) if on])
             w.writerow([t["n"], t["c"], t["cat"], t["sub"] or "", t["zh"], t["mt"],
                         "|".join(t["a"]), src, t.get("note", "")])
-    os.replace(tmp, MERGED_CSV)
+    os.replace(tmp, _CURRENT_CSV)
     return True
+
+
+@app.route("/api/csv_list")
+def api_csv_list():
+    """列出可切换的数据源 CSV（工具目录下 tags_merged*.csv，排除分类覆盖文件）"""
+    files = sorted(f for f in os.listdir(HERE)
+                   if f.startswith("tags_merged") and f.endswith(".csv")
+                   and f != "tags_merged_classified.csv")
+    return {"ok": True, "files": files, "current": os.path.basename(_CURRENT_CSV)}
+
+
+@app.route("/api/switch_csv", methods=["POST"])
+def api_switch_csv():
+    """切换数据源 CSV 并重新加载（编辑写回目标也随切换改变）"""
+    global _CURRENT_CSV, _RELOAD
+    d = request.get_json(silent=True) or {}
+    name = (d.get("file") or "").strip()
+    if not name or os.path.basename(name) != name or name == "tags_merged_classified.csv":
+        return jsonify({"ok": False, "error": "非法文件名"})
+    path = os.path.join(HERE, name)
+    if not os.path.isfile(path):
+        return jsonify({"ok": False, "error": "文件不存在"})
+    if path == _CURRENT_CSV and _TAGS is not None:
+        return jsonify({"ok": True, "file": name, "total": len(_TAGS), "same": True})
+    _CURRENT_CSV = path
+    _RELOAD = True
+    load_tags()
+    return jsonify({"ok": True, "file": name, "total": len(_TAGS)})
 
 
 @app.route("/api/edit_tag", methods=["POST"])
@@ -1028,6 +1088,7 @@ def api_stats():
     return {
         "ok": True,
         "total": len(_TAGS),
+        "csv": os.path.basename(_CURRENT_CSV),
         "cats": cats,
         "db": sum(1 for t in _TAGS if t["db"]),
         "v2": sum(1 for t in _TAGS if t["v2"]),
