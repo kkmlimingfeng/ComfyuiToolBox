@@ -29,20 +29,44 @@ MAX_NEW_TOKENS = 512
 N_CTX = 8192                 # 上下文长度（需容纳图像视觉 token + 提示词 + 输出）
 DEFAULT_RES = 1536           # 默认图像长边上限：768 快 / 1024 均衡 / 1536 高清
 
-# 可选视觉模型（主模型 + mmproj 视觉投影，均放在统一启动器/model/ 下）
-MODELS = {
-    "qwen3vl4b": {
-        "label": "Qwen3-VL-4B Uncensored · Q4_K_M（≈3.2G 显存）",
-        "model": "Qwen3-VL-4B-Instruct-Uncensored.Q4_K_M.gguf",
-        "mmproj": "Qwen3-VL-4B-Instruct-Uncensored.mmproj-f16.gguf",
-    },
-    "qwen327b": {
-        "label": "Qwen3.8-27B · IQ3_XS（≈13G 显存）",
-        "model": "Qwen3.8-27B-IQ3_XS.gguf",
-        "mmproj": "mmproj-Qwen3.8-27B-BF16.gguf",
-    },
-}
-DEFAULT_MODEL = "qwen3vl4b"
+# 可选视觉模型：自动扫描 model/ 目录，按文件名配对主模型与 mmproj 视觉投影
+# 命名约定：mmproj 文件名中 "mmproj" 字段紧跟模型名，如
+#   主模型  <模型名>-<量化>.gguf
+#   mmproj  <模型名>-mmproj-<量化>.gguf
+def scan_models():
+    """扫描 model/ 下的 GGUF，返回 {key: {label, model, mmproj}}。key 为主模型文件名（去 .gguf）。"""
+    models = {}
+    if not os.path.isdir(MODEL_DIR):
+        return models
+    mmprojs = {}   # 前缀(模型名) -> mmproj 文件名
+    mains = []
+    for f in os.listdir(MODEL_DIR):
+        if not f.lower().endswith(".gguf"):
+            continue
+        stem = f[:-5]
+        idx = stem.lower().find("mmproj")
+        if idx > 0:
+            mmprojs[stem[:idx].rstrip(".-_ ")] = f
+        else:
+            mains.append(f)
+    for f in sorted(mains):
+        stem = f[:-5]
+        best = None   # 取最长匹配前缀的 mmproj
+        for prefix in mmprojs:
+            if stem.startswith(prefix) and (best is None or len(prefix) > len(best)):
+                best = prefix
+        if not best:
+            print(f"[scan] 跳过 {f}（未找到配对的 mmproj 文件）")
+            continue
+        mp = mmprojs[best]
+        size = os.path.getsize(os.path.join(MODEL_DIR, f)) / 1024**3
+        models[stem] = {
+            "label": f"{stem}（≈{size:.1f}G）",
+            "model": f,
+            "mmproj": mp,
+        }
+    return models
+
 
 DEFAULT_SYS_PROMPT = (
     "You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels "
@@ -170,7 +194,7 @@ def _nvml_mem():
 def load_model(key):
     global _model
     try:
-        m = MODELS.get(key)
+        m = scan_models().get(key)
         if not m:
             raise ValueError(f"未知模型: {key}")
         model_path = os.path.join(MODEL_DIR, m["model"])
@@ -682,15 +706,17 @@ def status():
 
 @app.get("/api/models")
 def api_models():
-    return jsonify({"ok": True, "models": MODELS, "current": _state.get("model"),
-                    "default": DEFAULT_MODEL, "status": _state["status"]})
+    models = scan_models()   # 每次请求重新扫描，放入新模型文件后刷新页面即可看到
+    default = next(iter(models), None)
+    return jsonify({"ok": True, "models": models, "current": _state.get("model"),
+                    "default": default, "status": _state["status"]})
 
 
 @app.post("/api/load")
 def api_load():
     data = request.get_json(silent=True) or {}
-    key = data.get("model") or DEFAULT_MODEL
-    if key not in MODELS:
+    key = data.get("model") or next(iter(scan_models()), None)
+    if not key or key not in scan_models():
         return jsonify({"ok": False, "message": f"未知模型: {key}"}), 400
     if _state["status"] == "ready" and _state.get("model") != key:
         unload_model()  # 切换模型：先释放当前模型再加载新的
@@ -765,8 +791,8 @@ def infer():
 
 if __name__ == "__main__":
     print(f"[app] model dir: {MODEL_DIR}")
-    for k, m in MODELS.items():
-        print(f"[app]   - {k}: {m['model']}")
+    for k, m in scan_models().items():
+        print(f"[app]   - {k}: {m['model']} + {m['mmproj']}")
     # 模型不再启动时自动加载，等用户在页面上点"加载模型"再载入（省显存）
     print(f"[app] model will NOT auto-load; click the load button on the page when needed")
 

@@ -197,7 +197,7 @@ run.bat
 
 - 单张图片或整个文件夹批量反推
 - 中文 / 英文 Prompt 生成
-- Qwen3-VL-4B 与 Qwen3.8-27B 两种模型切换
+- 视觉模型自动扫描 `model/` 目录，放入即用（Qwen3-VL-4B / Qwen3.8-27B 等）
 - 手动加载 / 卸载模型，按需占用和释放显存
 - 自定义、保存和恢复系统提示词
 - 图片分辨率设置与结果复制、下载
@@ -306,24 +306,29 @@ model/
 
 模型仓库：<https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF>
 
-### Qwen3-VL 视觉模型（GGUF）
+### 视觉模型（GGUF）
 
 用于 Krea2 提示词反推（llama.cpp 推理，页面可切换模型）。
 
-可选模型（主模型 + mmproj 视觉投影，均放在 `model/` 下）：
+模型放在 `model/` 下后自动扫描识别，命名约定（`mmproj` 字段紧跟模型名）：
 
 ```text
 model/
 ├── Qwen3-VL-4B-Instruct-Uncensored.Q4_K_M.gguf
 ├── Qwen3-VL-4B-Instruct-Uncensored.mmproj-f16.gguf
-├── Qwen3.8-27B-IQ3_XS.gguf                # 可选：更大模型，约 13G 显存
-└── mmproj-Qwen3.8-27B-BF16.gguf
+├── Qwen3.8-27B-IQ3_XS.gguf                              # 可选：更大模型，约 13G 显存
+├── Qwen3.8-27B-mmproj-BF16.gguf
+├── orcarouter_Qwen3.8-27B-Uncensored-IQ3_XXS.gguf       # 可选：未审查版本，约 13G 显存
+└── orcarouter_Qwen3.8-27B-Uncensored-mmproj-bf16.gguf
 ```
+
+即主模型为 `<模型名>-<量化>.gguf`，对应视觉投影为 `<模型名>-mmproj-<量化>.gguf`，放入后刷新页面即可在下拉框中选择。
 
 模型仓库：
 
 - Qwen3-VL-4B-Instruct-Uncensored：<https://huggingface.co/mradermacher/Qwen3-VL-4B-Instruct-Uncensored-GGUF>
 - Qwen3.8-27B：<https://huggingface.co/bartowski/Qwen3.8-27B-GGUF>
+- Qwen3.8-27B Uncensored：<https://huggingface.co/bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF>
 
 视觉模型不会因为启动门户而自动加载，通常是在进入对应工具后按需加载，从而避免门户启动时立即占用大量显存。
 
