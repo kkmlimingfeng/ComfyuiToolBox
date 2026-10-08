@@ -330,6 +330,8 @@ model/
 
 模型来源：`tencent/Hy-MT2-1.8B-GGUF`
 
+模型仓库：<https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF>
+
 ### Qwen3-VL 视觉模型（GGUF）
 
 用于 Krea2 提示词反推（llama.cpp 推理，页面可切换模型）。
@@ -343,6 +345,11 @@ model/
 ├── Qwen3.8-27B-IQ3_XS.gguf                # 可选：更大模型，约 13G 显存
 └── mmproj-Qwen3.8-27B-BF16.gguf
 ```
+
+模型仓库：
+
+- Qwen3-VL-4B-Instruct-Uncensored：<https://huggingface.co/mradermacher/Qwen3-VL-4B-Instruct-Uncensored-GGUF>
+- Qwen3.8-27B：<https://huggingface.co/bartowski/Qwen3.8-27B-GGUF>
 
 视觉模型不会因为启动门户而自动加载，通常是在进入对应工具后按需加载，从而避免门户启动时立即占用大量显存。
 
