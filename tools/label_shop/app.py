@@ -492,8 +492,8 @@ PAGE = r"""<!doctype html>
   .tag { position:relative; display:flex; flex-direction:column;
          background:var(--card); border:1px solid var(--border); border-radius:10px;
          padding:7px 30px 7px 10px; margin:0 0 8px; break-inside:avoid; }
-  .tag .row1 { display:flex; align-items:center; justify-content:space-between; gap:6px; }
-  .tag .nm { font-size:13px; font-weight:600; font-family:Consolas,monospace;
+  .tag .row1 { display:flex; align-items:flex-start; gap:6px; padding-right:48px; min-width:0; }
+  .tag .nm { min-width:0; font-size:13px; font-weight:600; font-family:Consolas,monospace;
              word-break:break-all; line-height:1.35; }
   .tag .zh { font-size:12.5px; color:var(--zhc); margin-top:3px; line-height:1.35;
              word-break:break-all; display:-webkit-box; -webkit-line-clamp:2;
