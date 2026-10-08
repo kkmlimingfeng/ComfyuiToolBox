@@ -139,32 +139,6 @@ python\python.exe
 
 安装项目依赖，并检查 PyTorch / CUDA 等核心组件。
 
-#### 🤖 模型
-
-项目中的部分功能使用 Hugging Face 上公开发布的模型。
-
-**Hy-MT2 1.8B**
-
-用于本地文本翻译。
-
-模型仓库：
-
-<https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF>
-
-当前使用：
-
-```text
-Hy-MT2-1.8B-Q4_K_M.gguf
-```
-
-**Qwen3-VL-4B-FP8**
-
-用于Krea2反推提示词功能。
-
-模型仓库：
-
-<https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-FP8>
-
 ### 3. 启动门户
 
 ```bat
