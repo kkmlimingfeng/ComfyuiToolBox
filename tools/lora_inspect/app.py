@@ -518,6 +518,7 @@ function render(i) {
     let html = '<h2>' + i.file + '</h2><div class="path">' + i.path + '</div>';
     html += '<div class="badges">'
         + '<span class="badge">' + i.algorithm + '</span>'
+        + (i.trainer ? '<span class="badge blue">' + esc(i.trainer) + '</span>' : '')
         + (i.network_module_pretty && i.network_module_pretty !== i.algorithm
             ? '<span class="badge gray">' + i.network_module_pretty + '</span>' : '')
         + targets.map(t => '<span class="badge ' + (t === 'Unet' ? 'unet' : 'te') + '">' + t + '</span>').join('')
@@ -531,6 +532,7 @@ function render(i) {
         .map(p => '<div class="row"><b>' + p[0] + '</b><span>' + fmt(p[1]) + '</span></div>').join('') + '</div>';
 
     html += '<div class="sec"><h3>模型</h3>' + kv([
+        ['训练引擎', i.trainer], ['trainer_info', i.trainer_info && Object.keys(i.trainer_info).length ? JSON.stringify(i.trainer_info) : null],
         ['基础架构', i.architecture || (i.is_sdxl ? 'SDXL' : (String(i.is_v2).toLowerCase() === 'true' ? 'SD v2' : 'SD 1.5 (?)'))],
         ['底模', i.base_model_name], ['底模版本', i.base_model_version], ['底模 hash', i.sd_model_hash]
     ]) + '</div>';

@@ -5,5 +5,5 @@
   "icon": "🔍",
   "port": 7864,
   "script": "app.py",
-  "desc": "查看 LoRA / LyCORIS 的算法、rank/alpha、底模与训练参数"
+  "desc": "查看 LoRA / LyCORIS 的算法、训练引擎（kohya/Anima/ai-toolkit）、rank/alpha、底模与训练参数"
 }

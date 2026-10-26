@@ -42,6 +42,12 @@ except ImportError:
 
 # 训练器常用的 LoRA / LyCORIS key 后缀。注意 LyCORIS 没有 ".weight"。
 LORA_STD_SUFFIXES = (".lora_down.weight", ".lora_up.weight", ".alpha")
+# PEFT / diffusers 格式（ai-toolkit、ComfyUI 系训练器等）：无 .alpha，rank 取 alpha 默认值
+PEFT_LORA_SUFFIXES = (
+    ".lora_A.weight", ".lora_B.weight",
+    ".lora_A.embedding.weight", ".lora_B.embedding.weight",
+    ".lora_embedding_A", ".lora_embedding_B",
+)
 LYCORIS_SUFFIXES = (
     # LoCon
     ".lora_down", ".lora_up", ".lora_mid",
@@ -112,7 +118,8 @@ def detect_algorithm(keys):
     """根据 key 后缀推断算法类型。"""
     has_std = any(k.endswith(LORA_STD_SUFFIXES) for k in keys)
     has_lyc = any(k.endswith(LYCORIS_SUFFIXES) for k in keys)
-    if not has_std and not has_lyc:
+    has_peft = any(k.endswith(PEFT_LORA_SUFFIXES) for k in keys)
+    if not has_std and not has_lyc and not has_peft:
         return ("unknown", set())
 
     suffix_counter = Counter()
@@ -126,6 +133,11 @@ def detect_algorithm(keys):
                 if k.endswith(s):
                     suffix_counter["lyc_" + s] += 1
                     break
+            else:
+                for s in PEFT_LORA_SUFFIXES:
+                    if k.endswith(s):
+                        suffix_counter["peft_" + s] += 1
+                        break
 
     # 决定算法
     if has_lyc:
@@ -144,7 +156,25 @@ def detect_algorithm(keys):
         if "lyc_.lora_down" in suffix_counter or "lyc_.lora_up" in suffix_counter:
             return ("LyCORIS/LoCon", suffix_counter)
         return ("LyCORIS", suffix_counter)
-    return ("LoRA", suffix_counter)
+    return ("LoRA (PEFT/diffusers)" if has_peft and not has_std else "LoRA", suffix_counter)
+
+
+def detect_trainer(meta, keys):
+    """根据 metadata 特征 + key 结构推断训练引擎（kohya sd-scripts / Anima / ai-toolkit / PEFT 系）。"""
+    # ai-toolkit (ostris)：metadata 带 training_info（kohya ss_* 之外的特征键）
+    if any(k == "training_info" or k.startswith("training_info") for k in meta):
+        return "AI Toolkit (ostris)"
+    if any(k.startswith("ss_") for k in meta):
+        nm = str(safe_get(meta, "ss_network_module") or "")
+        impl = str(meta.get("modelspec.implementation") or "").lower()
+        arch = str(meta.get("modelspec.architecture") or "").lower()
+        if "lora_anima" in nm or "circlestone" in impl or "anima" in impl or arch.startswith("anima"):
+            return "Anima 训练器（sd-scripts Anima 分支）"
+        return "kohya sd-scripts"
+    # 无 metadata 时按 key 结构兜底：PEFT 格式多为 ai-toolkit / ComfyUI 系训练器
+    if any(k.endswith((".lora_A.weight", ".lora_B.weight")) for k in keys):
+        return "Diffusers/PEFT 格式（ai-toolkit / ComfyUI 系训练器）"
+    return ""
 
 
 def infer_rank(open_file, keys, algorithm):
@@ -157,6 +187,9 @@ def infer_rank(open_file, keys, algorithm):
         s = list(shape)
         if algorithm == "LoRA" and k.endswith(".lora_down.weight"):
             # 形状 (rank, in_features)
+            return s[0] if s else None
+        if k.endswith(".lora_A.weight"):
+            # PEFT 格式 (rank, in_features)
             return s[0] if s else None
         if algorithm == "LyCORIS/LoCon":
             if k.endswith(".lora_down"):
@@ -189,7 +222,7 @@ def infer_rank(open_file, keys, algorithm):
 
 def strip_suffix(key):
     """剥掉算法后缀，留下“层路径”部分。"""
-    for s in LORA_STD_SUFFIXES + LYCORIS_SUFFIXES:
+    for s in LORA_STD_SUFFIXES + PEFT_LORA_SUFFIXES + LYCORIS_SUFFIXES:
         if key.endswith(s):
             return key[:-len(s)]
     return key
@@ -199,6 +232,9 @@ def parse_submodel(layer_path):
     """把 key 归到 unet / te1 / te2 / other。"""
     if layer_path.startswith(UNET_PREFIX):
         return "unet", layer_path[len(UNET_PREFIX):]
+    if layer_path.startswith("diffusion_model."):
+        # PEFT / diffusers 格式（ai-toolkit 等）
+        return "unet", layer_path[len("diffusion_model."):]
     if layer_path.startswith("lora_te_text_model_"):
         return "te1", layer_path[len("lora_te_text_model_"):]
     if layer_path.startswith("lora_te1_"):
@@ -328,6 +364,16 @@ def inspect_one(path):
         except json.JSONDecodeError:
             pass
     info["network_args"] = network_args
+
+    # ---- 训练引擎识别（kohya sd-scripts / Anima / ai-toolkit / PEFT 系）----
+    info["trainer"] = detect_trainer(meta, keys)
+    trainer_info = safe_get(meta, "training_info")
+    if isinstance(trainer_info, str) and trainer_info.startswith("{"):
+        try:
+            trainer_info = json.loads(trainer_info)
+        except json.JSONDecodeError:
+            trainer_info = None
+    info["trainer_info"] = trainer_info if isinstance(trainer_info, dict) else {}
 
     rank_meta = to_int(safe_get(meta, "ss_network_dim")) or to_int(safe_get(meta, "network_dim"))
     alpha_meta = to_int(safe_get(meta, "ss_network_alpha")) or to_int(safe_get(meta, "network_alpha"))
@@ -576,6 +622,11 @@ def print_report(info):
     print("-" * 78)
     print(f"算法:       {info['algorithm']}"
           + (f"  ({info['network_module_pretty']})" if info.get('network_module_pretty') else ""))
+    if info.get("trainer"):
+        print(f"训练引擎:   {info['trainer']}")
+    if info.get("trainer_info"):
+        ti = ", ".join(f"{k}={v}" for k, v in list(info["trainer_info"].items())[:8])
+        print(f"  trainer_info: {ti}")
 
     rank = info["rank_meta"] or info["rank_inferred"]
     alpha = info["alpha_meta"] if info["alpha_meta"] is not None else rank
@@ -658,6 +709,15 @@ def print_report(info):
             pass
 
     print("-" * 78)
+    tag_freq = info.get("tag_frequency") or []
+    if tag_freq:
+        n_show = min(40, len(tag_freq))
+        tags_s = ", ".join(f"{t}×{c}" for t, c in tag_freq[:n_show])
+        if len(tags_s) > 1000:
+            tags_s = tags_s[:997] + "..."
+        print(f"训练标签（前 {n_show} / 共 {len(tag_freq)} 个，出现 {info.get('tag_total', 0)} 次）:")
+        print(f"  {tags_s}")
+        print("-" * 78)
     print("作用层级统计:")
     sub = info["submodel_summary"]
     if sub:
