@@ -595,6 +595,7 @@ function render(i) {
         ['epoch', i.final_epoch !== null ? i.final_epoch + ' / ' + fmt(i.num_epochs) : null],
         ['训练图片', i.num_train_images], ['正则图片', i.num_reg_images],
         ['batch', (i.batch_size_per_device ?? '') !== '' ? '每卡 ' + i.batch_size_per_device + ' / 总 ' + fmt(i.total_batch_size) : null],
+        ['每轮批数', i.num_batches_per_epoch],
         ['梯度累加', i.grad_accum],
         ['分辨率', i.resolution], ['clip skip', i.clip_skip], ['max token length', i.max_token_length],
         ['数据集', ddirs], ['分桶', bucket],
