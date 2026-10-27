@@ -595,7 +595,7 @@ function render(i) {
         ['epoch', i.final_epoch !== null ? i.final_epoch + ' / ' + fmt(i.num_epochs) : null],
         ['训练图片', i.num_train_images], ['正则图片', i.num_reg_images],
         ['batch', (i.batch_size_per_device ?? '') !== '' ? '每卡 ' + i.batch_size_per_device + ' / 总 ' + fmt(i.total_batch_size) : null],
-        ['每epoch的batch数', i.num_batches_per_epoch],
+        ['每epoch的batch数', i.num_batches_per_epoch !== null && i.num_batches_per_epoch !== undefined && i.grad_accum > 1 ? i.num_batches_per_epoch + '（micro；每epoch优化器步数≈' + Math.ceil(i.num_batches_per_epoch / i.grad_accum) + '）' : i.num_batches_per_epoch],
         ['梯度累加', i.grad_accum],
         ['分辨率', i.resolution], ['clip skip', i.clip_skip], ['max token length', i.max_token_length],
         ['数据集', ddirs], ['分桶', bucket],
