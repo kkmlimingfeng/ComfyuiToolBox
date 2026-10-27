@@ -64,9 +64,9 @@ flowchart TB
 | --- | --- | :---: |
 | 🏷️ 图片标签编辑器 | 浏览图片、编辑 `.txt` 标签、批量增删/排序、离线翻译 | ✅ |
 | 🖼️ Krea2 提示词反推 | 使用本地视觉语言模型从图片生成文生图 Prompt | ✅ |
-| 🔍 LoRA 参数分析 | 查看网络算法、Rank / Alpha、训练信息及作用层级 | ✅ |
+| 🔍 LoRA 参数分析 | 查看网络算法、Rank / Alpha、训练引擎（kohya / Anima / ai-toolkit / fizgig）与底模家族、训练信息及作用层级 | ✅ |
 | 📂 批量文件后缀更改 | 批量追加 / 删除文件名字符串，支持预览和防覆盖 | ✅ |
-| 🛒 标签超市（本地） | 15 万+ 本地标签库：分类浏览、多词搜索、离线翻译、购物车组合 Prompt、多数据源 CSV 切换 | ✅ |
+| 🛒 标签超市（本地） | 本地标签库：Danbooru 15 万+ 与 Anima 官方词表 13.7 万+ 双数据源，分类浏览、多词搜索、离线翻译、购物车组合 Prompt、多数据源 CSV 切换 | ✅ |
 | 🛒 Danbooru 标签超市 | 查询、组合和导出 Danbooru 标签（第三方网络服务） | ✅ |
 | ✨ Stable Diffusion 法术解析 | NovelAI 官方 Danbooru 标签联想与拼写辅助（第三方网络服务） | ✅ |
 
@@ -219,13 +219,15 @@ run.bat
 
 可关注：
 
-- Network / LoRA 算法
-- Rank
-- Alpha
+- Network / LoRA 算法（kohya 标准格式、LyCORIS、PEFT/diffusers 均可识别）
+- 训练引擎识别：kohya sd-scripts、Anima 训练器、AI Toolkit (ostris)、fizgig、LyCORIS 等按 metadata 特征自动判别
+- 底模家族识别：MOSS-Image、Anima 等（含 `@画师` / 旧拼写等 Gelbooru 风格命名特征）
+- Rank / Alpha（含 PEFT 无 alpha 时按 rank 默认的约定）
 - Base Model
 - Epoch / Step
 - Learning Rate
 - 作用层级（Unet / TextEncoder）
+- 触发词（modelspec.trigger_phrase / usage_hint）
 - 训练标签与出现次数（kohya 训练元数据）
 - 发布信息（封面、标签、描述、许可证等 modelspec 元数据）
 - 支持离线翻译元数据内容
@@ -256,8 +258,11 @@ run.bat
 
 数据由 `tools/label_shop/build_data.py` 从原始数据集构建（含断点续跑的批量机翻），仓库直接附带成品数据，开箱即用：
 
-- `tags_merged.csv`：基础版（分类 + 翻译 + 机翻）
-- `tags_merged_fill.csv`：全量补翻版（15.2 万行中文翻译无空白，画师名统一标注「画师」），可在页面顶栏切换使用
+- `tags_merged.csv`：Danbooru 主数据（15.2 万行，分类 + 全量补翻，zh 无空白，画师名统一标注「画师」）
+- `tags_merged_anima.csv`：Anima 官方词表（13.7 万行，`anima-2.9B-preview-V1` 全量标签）。中文翻译优先采用社区通用译名库 [danbooru-tags-data-zh](https://huggingface.co/datasets/ame-la/danbooru-tags-data-zh)（截至 2026-08、图数 > 50 的标签），其余回退到 Danbooru 主数据译名；画师统一标注「画师」，泛用标签沿用本地分类体系
+- `anima_todo_zh.csv`：Anima 词表中暂无现成译名的部分（约 1.4 万行， Gelbooru 旧拼写角色/作品与 Anima 专属词），zh / zh_mt 留空待补
+
+三份数据格式一致，可在页面顶栏即时切换（编辑写回当前选中的文件）。
 
 <!-- 截图预留：docs/images/label_shop-detail.png -->
 
@@ -403,8 +408,9 @@ ComfyUI-Toolbox/
         ├── build_data.py          # 数据构建 + 批量机翻（可选）
         ├── manifest.json
         ├── run.bat
-        ├── tags_merged.csv        # 成品标签数据（分类 + 翻译 + 机翻）
-        └── tags_merged_fill.csv   # 全量补翻版（zh 无空白，画师名统一标注）
+        ├── tags_merged.csv        # 成品标签数据（分类 + 全量补翻）
+        ├── tags_merged_anima.csv  # Anima 官方词表数据源（含社区通用译名）
+        └── anima_todo_zh.csv      # Anima 词表待翻译部分（zh 留空）
 ```
 
 ---
