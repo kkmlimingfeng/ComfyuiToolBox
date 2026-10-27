@@ -4,6 +4,7 @@ files/
 # 备份 / 生成物 / 运行时缓存
 tags_merged.csv.bak
 tags_merged_classified.csv
+tags_merged_anima_todo.csv
 _cls_cache.json
 _mt_progress.json
 __pycache__/
