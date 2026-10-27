@@ -579,8 +579,8 @@ def inspect_one(path):
             return (int(m[0]), int(m[1]))
         return None
 
-    # 分辨率：优先由分桶推算——主值取有效桶（图片数 ≥ 总数 1%）中 w+h 最大的桶的实际尺寸，
-    # 括号内为推算的训练分辨率（max(w+h)/2 取 64 的倍数）；排除孤例桶防止极端尺寸拉偏
+    # 分辨率：括号外为元数据原本读取的分辨率（无元数据时取有效桶中 w+h 最大桶的实际尺寸），
+    # 括号内为分桶推算的训练分辨率（有效桶 = 图片数 ≥ 总数 1%，取 max(w+h)/2 向下取 64 倍数）
     meta_reso = parse_reso(safe_get(meta, "ss_resolution"))
     if bucket_items:
         tot_n = sum(bucket_items.values())
@@ -590,7 +590,8 @@ def inspect_one(path):
         bw, bh = max(((k, n) for k, n in main_items.items() if k[0] + k[1] == max_sum),
                      key=lambda x: x[1])[0]
         derived = max(64, (max_sum // 2) // 64 * 64)
-        info["resolution"] = f"{bw}x{bh}（分桶推算 {derived}x{derived}）"
+        outer = f"{meta_reso[0]}x{meta_reso[1]}" if meta_reso else f"{bw}x{bh}"
+        info["resolution"] = f"{outer}（分桶推算 {derived}x{derived}）"
     elif meta_reso:
         info["resolution"] = f"{meta_reso[0]}x{meta_reso[1]}"
     else:
