@@ -576,16 +576,17 @@ function render(i) {
     const ds0 = (i.datasets && i.datasets[0]) || null;
     let bucket = ds0 ? (ds0.enable_bucket
         ? '开启 ' + ds0.min_bucket_reso + '–' + ds0.max_bucket_reso : '关闭') : null;
+    let bucketItems = [];
     const bi = (i.bucket_info && i.bucket_info.buckets) || null;
     if (bi && Object.keys(bi).length) {
-        const items = Object.values(bi)
+        bucketItems = Object.values(bi)
             .filter(b => Array.isArray(b.resolution) && b.resolution.length === 2)
             .map(b => [b.resolution[0] + 'x' + b.resolution[1], b.count || 0])
             .sort((a, b) => b[1] - a[1]);
-        if (items.length) {
-            const total = items.reduce((s, x) => s + x[1], 0);
-            bucket = '分桶训练，' + items.length + ' 种 / ' + fmt(total) + ' 张图：'
-                + items.map(x => x[0] + '×' + fmt(x[1])).join('，');
+        if (bucketItems.length) {
+            const main = bucketItems[0];
+            bucket = '分桶训练，' + bucketItems.length + ' 种，主力 ' + main[0]
+                + '（' + fmt(main[1]) + ' 张）';
         }
     }
 
@@ -603,6 +604,18 @@ function render(i) {
         ['min_snr_gamma', i.min_snr_gamma], ['noise_offset', i.noise_offset],
         ['开始时间', i.started_at], ['耗时', i.training_duration]
     ]) + '</div>';
+
+    if (bucketItems.length) {
+        const bTotal = bucketItems.reduce((s, x) => s + x[1], 0) || 1;
+        html += '<div class="sec"><h3>分桶明细'
+            + ' <span style="opacity:.6;font-weight:normal">' + bucketItems.length
+            + ' 种 / 共 ' + fmt(bTotal) + ' 张图</span></h3><table>'
+            + '<tr><th>分辨率</th><th>图片数</th><th>占比</th></tr>'
+            + bucketItems.map(x =>
+                '<tr><td>' + x[0] + '</td><td>' + fmt(x[1]) + '</td><td>'
+                + (x[1] * 100 / bTotal).toFixed(1) + '%</td></tr>').join('')
+            + '</table></div>';
+    }
 
     if (i.tag_frequency && i.tag_frequency.length) {
         html += '<div class="sec"><h3 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">训练标签'
