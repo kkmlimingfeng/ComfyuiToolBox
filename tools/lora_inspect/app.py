@@ -574,8 +574,20 @@ function render(i) {
             .map(([k, v]) => k + '（' + v.img_count + ' 张 × ' + v.n_repeats + ' 次）').join('；')
         : null;
     const ds0 = (i.datasets && i.datasets[0]) || null;
-    const bucket = ds0 ? (ds0.enable_bucket
+    let bucket = ds0 ? (ds0.enable_bucket
         ? '开启 ' + ds0.min_bucket_reso + '–' + ds0.max_bucket_reso : '关闭') : null;
+    const bi = (i.bucket_info && i.bucket_info.buckets) || null;
+    if (bi && Object.keys(bi).length) {
+        const items = Object.values(bi)
+            .filter(b => Array.isArray(b.resolution) && b.resolution.length === 2)
+            .map(b => [b.resolution[0] + 'x' + b.resolution[1], b.count || 0])
+            .sort((a, b) => b[1] - a[1]);
+        if (items.length) {
+            const total = items.reduce((s, x) => s + x[1], 0);
+            bucket = '分桶训练，' + items.length + ' 种 / ' + fmt(total) + ' 张图：'
+                + items.map(x => x[0] + '×' + fmt(x[1])).join('，');
+        }
+    }
 
     html += '<div class="sec"><h3>训练参数</h3>' + kv([
         ['步数', i.final_step !== null ? i.final_step + ' / max ' + fmt(i.max_train_steps) : null],

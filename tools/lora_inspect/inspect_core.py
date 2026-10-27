@@ -511,8 +511,26 @@ def inspect_one(path):
                     "enable_bucket": ds.get("enable_bucket"),
                     "min_bucket_reso": to_int(ds.get("min_bucket_reso")),
                     "max_bucket_reso": to_int(ds.get("max_bucket_reso")),
+                    # Anima 训练器把分桶信息嵌在 subset 的 bucket_info 里
+                    "bucket_info": ds.get("bucket_info") if isinstance(ds.get("bucket_info"), dict) else None,
                 })
     info["datasets"] = ds_list
+
+    # 分桶主力桶：bucket_info.buckets 里出现次数最高的分辨率（比 modelspec 默认值可信）
+    def main_bucket(ds_list):
+        best, best_n = None, -1
+        for ds in ds_list:
+            bi = ds.get("bucket_info") or {}
+            buckets = bi.get("buckets") if isinstance(bi.get("buckets"), dict) else {}
+            for b in buckets.values():
+                try:
+                    n = int(b.get("count") or 0)
+                    res = b.get("resolution")
+                except (TypeError, ValueError):
+                    continue
+                if res and isinstance(res, (list, tuple)) and len(res) == 2 and n > best_n:
+                    best, best_n = res, n
+        return best, best_n
 
     info["resolution"] = safe_get(meta, "ss_resolution")
     if info["resolution"] is None:
@@ -521,7 +539,19 @@ def inspect_one(path):
                 info["resolution"] = "x".join(str(x) for x in ds["resolution"])
                 break
     if info["resolution"] is None:
+        res, n = main_bucket(ds_list)
+        if res:
+            info["resolution"] = f"{res[0]}x{res[1]}（分桶主力，{n} 张图）"
+    # modelspec.resolution 常是训练器写入规范时的默认占位（如 1024x1024），仅作最后回退
+    if info["resolution"] is None:
         info["resolution"] = safe_get(meta, "modelspec.resolution")
+
+    info["bucket_info"] = safe_get(meta, "ss_bucket_info")
+    if info["bucket_info"] is None:
+        for ds in ds_list:
+            if ds["bucket_info"]:
+                info["bucket_info"] = ds["bucket_info"]
+                break
 
     info["clip_skip"] = safe_get(meta, "ss_clip_skip")
     info["max_token_length"] = to_int(safe_get(meta, "ss_max_token_length"))
@@ -566,7 +596,7 @@ def inspect_one(path):
     info["noise_offset"] = to_float(safe_get(meta, "ss_noise_offset"))
     info["ip_noise_gamma"] = to_float(safe_get(meta, "ss_ip_noise_gamma"))
     info["zero_terminal_snr"] = safe_get(meta, "ss_zero_terminal_snr")
-    info["bucket_info"] = safe_get(meta, "ss_bucket_info")
+    # bucket_info 已在 ss_datasets 解析处赋值（含嵌套回退），此处不再覆盖
     info["shuffle_caption"] = safe_get(meta, "ss_shuffle_caption")
     info["keep_tokens"] = to_int(safe_get(meta, "ss_keep_tokens"))
     info["caption_dropout_rate"] = to_float(safe_get(meta, "ss_caption_dropout_rate"))
@@ -737,8 +767,20 @@ def print_report(info):
             if isinstance(bi, str):
                 bi = json.loads(bi)
             buckets = bi.get("buckets", {}) if isinstance(bi, dict) else {}
-            if buckets:
-                print(f"  分桶:          共 {len(buckets)} 个")
+            items = []
+            for b in buckets.values():
+                try:
+                    res = b.get("resolution")
+                    n = int(b.get("count") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if res and isinstance(res, (list, tuple)) and len(res) == 2:
+                    items.append((n, f"{res[0]}x{res[1]}"))
+            if items:
+                items.sort(reverse=True)
+                total = sum(n for n, _ in items)
+                detail = ", ".join(f"{s}×{n}" for n, s in items)
+                print(f"  分桶:          共 {len(items)} 种 / {total} 张图: {detail}")
         except Exception:
             pass
 
