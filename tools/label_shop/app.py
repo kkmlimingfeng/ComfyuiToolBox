@@ -296,6 +296,7 @@ def load_tags():
                         "sub": (r.get("sub") or "").strip(),
                         "a": [x for x in (r.get("aliases") or "").split("|") if x],
                         "db": "db" in src, "v2": "v2" in src, "v3": "v3" in src,
+                        "gb": "gelbooru" in src, "src0": src,
                         "note": (r.get("note") or "").strip(),
                     })
             for t in tags:
@@ -340,7 +341,8 @@ def load_tags():
 
         def new_rec(name, cnt, cat, sub, aliases, zh, note):
             return {"n": name, "zh": zh, "mt": "", "c": cnt, "cat": cat, "sub": sub,
-                    "a": aliases, "db": False, "v2": False, "v3": False, "note": note}
+                    "a": aliases, "db": False, "v2": False, "v3": False, "gb": False,
+                    "src0": "", "note": note}
 
         cache = _load_cls_cache()
         cls = cache["cls"]
@@ -508,6 +510,7 @@ PAGE = r"""<!doctype html>
   .bd.db { background:#0984e3; color:#fff; }
   .bd.v2 { background:#0a9d58; color:#fff; }
   .bd.v3 { background:#e67e22; color:#fff; }
+  .bd.gb { background:#8e44ad; color:#fff; }
   .bd.cnt { background:var(--hover); color:var(--muted); }
   .plus { position:absolute; top:6px; right:6px; width:22px; height:22px; border-radius:7px;
           border:1px solid var(--border); background:var(--hover); color:var(--text);
@@ -594,6 +597,7 @@ PAGE = r"""<!doctype html>
   .srcbtn.sdb.on { background:#0984e3; border-color:#0984e3; color:#fff; opacity:1; border-style:solid; }
   .srcbtn.sv2.on { background:#0a9d58; border-color:#0a9d58; color:#fff; opacity:1; border-style:solid; }
   .srcbtn.sv3.on { background:#e67e22; border-color:#e67e22; color:#fff; opacity:1; border-style:solid; }
+  .srcbtn.sgb.on { background:#8e44ad; border-color:#8e44ad; color:#fff; opacity:1; border-style:solid; }
   .srcnote { font-size:12px; color:var(--muted); margin-left:2px; }
   .csvsel { padding:8px 10px; border-radius:8px; border:1px solid var(--border);
             background:var(--bg); color:var(--text); font-size:13px; max-width:230px; }
@@ -608,6 +612,7 @@ PAGE = r"""<!doctype html>
       <button class="srcbtn sdb on" id="src_db" onclick="toggleSrc('db')" title="要求标签包含 danbooru 来源（交集，可多选；全灭=不过滤）">danbooru</button>
       <button class="srcbtn sv2 on" id="src_v2" onclick="toggleSrc('v2')" title="要求标签包含 WD14 v2 来源（交集，可多选；全灭=不过滤）">v2</button>
       <button class="srcbtn sv3 on" id="src_v3" onclick="toggleSrc('v3')" title="要求标签包含 WD14 v3 来源（交集，可多选；全灭=不过滤）">v3</button>
+      <button class="srcbtn sgb on" id="src_gb" onclick="toggleSrc('gb')" title="要求标签出现在 Anima（Gelbooru 系）词表（交集，可多选；全灭=不过滤）">gelbooru</button>
       <span class="srcnote" id="srcnote" style="display:none">不过滤</span>
     </span>
     <select id="csvsel" class="csvsel" title="切换数据源 CSV；编辑卡片会写回当前选中的文件" onchange="switchCsv(this.value)"></select>
@@ -675,8 +680,8 @@ PAGE = r"""<!doctype html>
 
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let curQ = '', curCat = '全部', curSub = '', curOffset = 0, total = 0, seq = 0, CATDATA = [];
-let SRC = { db: 0, v2: 0, v3: 0 }, openCat = '';   // 来源统计 / 侧栏展开的大类
-let SRCF = { db: true, v2: true, v3: true };       // 全局来源筛选：亮的来源必须包含（交集），全灭 = 不过滤
+let SRC = { db: 0, v2: 0, v3: 0, gb: 0 }, openCat = '';   // 来源统计 / 侧栏展开的大类
+let SRCF = { db: true, v2: true, v3: true, gb: true };       // 全局来源筛选：亮的来源必须包含（交集），全灭 = 不过滤
 function toggleSrc(k) {
     SRCF[k] = !SRCF[k];
     document.getElementById('src_' + k).classList.toggle('on', SRCF[k]);
@@ -740,7 +745,7 @@ async function loadCats() {
     const r = await fetch('/api/stats'); const d = await r.json();
     if (!d.ok) return;
     CATDATA = d.cats;
-    SRC = { db: d.db, v2: d.v2, v3: d.v3 };
+    SRC = { db: d.db, v2: d.v2, v3: d.v3, gb: d.gb };
     renderSide();
 }
 function renderSide() {
@@ -762,7 +767,8 @@ function renderSide() {
         return h;
     }).join('');
     html += '<div class="smeta">来源统计<br>danbooru ' + SRC.db.toLocaleString()
-        + '<br>v2 收录 ' + SRC.v2.toLocaleString() + ' · v3 收录 ' + SRC.v3.toLocaleString() + '</div>';
+        + '<br>v2 收录 ' + SRC.v2.toLocaleString() + ' · v3 收录 ' + SRC.v3.toLocaleString()
+        + '<br>gelbooru ' + SRC.gb.toLocaleString() + '</div>';
     document.getElementById('side').innerHTML = html;
 }
 function itemClick(c) {
@@ -791,6 +797,7 @@ function tagHtml(t) {
         + (t.db ? '<span class="bd db" title="出现在 danbooru_all">danbooru</span>' : '')
         + (t.v2 ? '<span class="bd v2" title="WD14 v2 收录">v2</span>' : '')
         + (t.v3 ? '<span class="bd v3" title="WD14 v3 收录">v3</span>' : '')
+        + (t.gb ? '<span class="bd gb" title="出现在 Anima（Gelbooru 系）词表">gelbooru</span>' : '')
         + (t.c ? '<span class="bd cnt">' + fmtC(t.c) + '</span>' : '')
         + '<span class="bd cnt">' + esc(catText) + '</span>'
         + '</div>'
@@ -1004,7 +1011,11 @@ def save_merged():
         w = csv.writer(f)
         w.writerow(["name", "count", "cat", "sub", "zh", "zh_mt", "aliases", "sources", "note"])
         for t in _TAGS:
-            src = ",".join([k for k, on in (("db", t["db"]), ("v2", t["v2"]), ("v3", t["v3"])) if on])
+            flags = [k for k, on in (("db", t["db"]), ("v2", t["v2"]), ("v3", t["v3"]),
+                                     ("gb", t.get("gb"))) if on]
+            if "anima" in (t.get("src0") or ""):   # Anima 词表数据源：保留 anima 标记
+                flags = ["anima"] + flags
+            src = ",".join(flags)
             w.writerow([t["n"], t["c"], t["cat"], t["sub"] or "", t["zh"], t["mt"],
                         "|".join(t["a"]), src, t.get("note", "")])
     os.replace(tmp, _CURRENT_CSV)
@@ -1093,6 +1104,7 @@ def api_stats():
         "db": sum(1 for t in _TAGS if t["db"]),
         "v2": sum(1 for t in _TAGS if t["v2"]),
         "v3": sum(1 for t in _TAGS if t["v3"]),
+        "gb": sum(1 for t in _TAGS if t.get("gb")),
     }
 
 
@@ -1112,7 +1124,7 @@ def api_search():
     ql = q.lower()
     # 空格分词多词 AND 匹配：所有词都要命中（例：“手 背后”→ arm_behind_back 手臂藏在背后）
     words = [(w, _norm(w)) for w in ql.split() if w] if ql else []
-    srcs = [s for s in (d.get("srcs") or []) if s in ("db", "v2", "v3")]
+    srcs = [s for s in (d.get("srcs") or []) if s in ("db", "v2", "v3", "gb")]
     try:
         mc = max(0, int(d.get("min_count") or 0))    # 最低次数过滤，0 = 不过滤
     except (TypeError, ValueError):
