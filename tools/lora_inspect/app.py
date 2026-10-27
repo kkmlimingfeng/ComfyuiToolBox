@@ -533,6 +533,7 @@ function render(i) {
 
     html += '<div class="sec"><h3>模型</h3>' + kv([
         ['训练引擎', i.trainer], ['trainer_info', i.trainer_info && Object.keys(i.trainer_info).length ? JSON.stringify(i.trainer_info) : null],
+        ['底模家族', i.base_model],
         ['基础架构', i.architecture || (i.is_sdxl ? 'SDXL' : (String(i.is_v2).toLowerCase() === 'true' ? 'SD v2' : 'SD 1.5 (?)'))],
         ['底模', i.base_model_name], ['底模版本', i.base_model_version], ['底模 hash', i.sd_model_hash]
     ]) + '</div>';
@@ -540,10 +541,12 @@ function render(i) {
     // 发布信息（modelspec 元数据：不依赖 kohya 训练数据，文件里有什么显示什么）
     const ms = i.modelspec || {};
     const msLabels = { title: '标题', author: '作者', date: '发布日期', license: '许可证',
-                       prediction_type: '预测类型', resolution: '分辨率' };
-    const msOrder = ['title', 'author', 'date', 'license', 'prediction_type', 'resolution'];
+                       prediction_type: '预测类型', resolution: '分辨率',
+                       trigger_phrase: '触发词', usage_hint: '使用提示', description: '描述' };
+    const msOrder = ['title', 'author', 'date', 'license', 'prediction_type', 'resolution',
+                     'trigger_phrase', 'usage_hint'];
     const msSkip = ['tags', 'thumbnail', 'sai_model_spec', 'implementation',
-                    'implementation_version', 'hash_sha256', 'description', 'usage_hint'];
+                    'implementation_version', 'hash_sha256'];
     const msRows = msOrder.map(k => [msLabels[k], ms[k]]);
     Object.keys(ms).forEach(k => {
         if (!msOrder.includes(k) && !msSkip.includes(k) && String(ms[k]).length < 160) msRows.push([k, ms[k]]);

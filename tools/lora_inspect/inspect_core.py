@@ -160,7 +160,16 @@ def detect_algorithm(keys):
 
 
 def detect_trainer(meta, keys):
-    """根据 metadata 特征 + key 结构推断训练引擎（kohya sd-scripts / Anima / ai-toolkit / PEFT 系）。"""
+    """根据 metadata 特征 + key 结构推断训练引擎（kohya sd-scripts / Anima / ai-toolkit / fizgig / PEFT 系）。"""
+    # software 字段自报家门（ai-toolkit / Civitai Spine 等）
+    soft = meta.get("software")
+    if isinstance(soft, str) and soft.startswith("{"):
+        try:
+            sname = str(json.loads(soft).get("name", "")).lower()
+        except Exception:
+            sname = ""
+        if "ai-toolkit" in sname:
+            return "AI Toolkit (ostris)"
     # ai-toolkit (ostris)：metadata 带 training_info（kohya ss_* 之外的特征键）
     if any(k == "training_info" or k.startswith("training_info") for k in meta):
         return "AI Toolkit (ostris)"
@@ -168,12 +177,30 @@ def detect_trainer(meta, keys):
         nm = str(safe_get(meta, "ss_network_module") or "")
         impl = str(meta.get("modelspec.implementation") or "").lower()
         arch = str(meta.get("modelspec.architecture") or "").lower()
+        if nm.startswith("fizgig"):
+            return "fizgig"
         if "lora_anima" in nm or "circlestone" in impl or "anima" in impl or arch.startswith("anima"):
             return "Anima 训练器（sd-scripts Anima 分支）"
+        if "lycoris" in nm:
+            return "kohya 系（LyCORIS）"
         return "kohya sd-scripts"
     # 无 metadata 时按 key 结构兜底：PEFT 格式多为 ai-toolkit / ComfyUI 系训练器
     if any(k.endswith((".lora_A.weight", ".lora_B.weight")) for k in keys):
         return "Diffusers/PEFT 格式（ai-toolkit / ComfyUI 系训练器）"
+    return ""
+
+
+def detect_base_model(meta):
+    """从训练元数据推断底模家族（MOSS-Image / Anima 等）。"""
+    vals = " ".join(str(meta.get(k) or "") for k in (
+        "ss_base_model_version", "ss_sd_model_name", "ss_architecture",
+        "modelspec.architecture", "modelspec.implementation"))
+    # 键名也参与匹配：如 kohakumoss_* 这类转换工具键
+    hay = (vals + " " + " ".join(meta.keys())).lower()
+    if "moss" in hay:
+        return "MOSS-Image"
+    if "anima" in hay:
+        return "Anima"
     return ""
 
 
@@ -442,6 +469,7 @@ def inspect_one(path):
     # ---- 训练参数 ----
     info["base_model_name"] = safe_get(meta, "ss_sd_model_name")
     info["base_model_version"] = safe_get(meta, "ss_base_model_version")
+    info["base_model"] = detect_base_model(meta)
     info["architecture"] = safe_get(meta, "modelspec.architecture") or safe_get(meta, "ss_v2")
     if not info["architecture"] and mtype in ("checkpoint", "diffusion"):
         # 无 modelspec / ss_* 时按 tensor 结构推断架构
@@ -641,13 +669,19 @@ def print_report(info):
         print("网络 dim/rank: (metadata 未记录，已无法从权重推断)")
 
     print("-" * 78)
-    arch = info.get("architecture") or (
+    arch = info.get("architecture") or info.get("base_model") or (
         "SDXL" if info.get("is_sdxl") else ("SDv2" if str(info.get("is_v2")).lower() == "true" else "SD 1.5(?)")
     )
     print(f"基础架构:   {arch}")
+    if info.get("base_model"):
+        print(f"底模家族:   {info['base_model']}")
     if info.get("base_model_name"):
         print(f"底模:       {info['base_model_name']}"
               + (f"  ({info['base_model_version']})" if info.get("base_model_version") else ""))
+    ms = info.get("modelspec") or {}
+    if ms.get("trigger_phrase") or ms.get("usage_hint"):
+        print(f"触发词:     {ms.get('trigger_phrase') or '-'}"
+              + (f"   （{ms['usage_hint']}）" if ms.get("usage_hint") else ""))
     if info.get("sd_model_hash"):
         print(f"底模 hash:  {info['sd_model_hash']}")
 
