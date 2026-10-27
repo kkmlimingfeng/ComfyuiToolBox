@@ -579,13 +579,15 @@ def inspect_one(path):
             return (int(m[0]), int(m[1]))
         return None
 
-    # 分辨率：优先由分桶推算（按图片数加权的 w+h 平均 / 2，取 64 的倍数），
-    # 比元数据/默认占位可信；无分桶时回退 ss_resolution → ss_datasets → modelspec
+    # 分辨率：优先由分桶推算——训练分辨率是分桶的上界，取有效桶（图片数 ≥ 总数 1%）
+    # 中 w+h 的最大值 / 2，取 64 的倍数；排除孤例桶防止极端尺寸拉偏
     meta_reso = parse_reso(safe_get(meta, "ss_resolution"))
     if bucket_items:
         tot_n = sum(bucket_items.values())
-        avg_half = sum((w + h) * n for (w, h), n in bucket_items.items()) / tot_n / 2
-        derived = max(64, int(round(avg_half / 64)) * 64)
+        thr = max(2, tot_n // 100)
+        main_items = {k: n for k, n in bucket_items.items() if n >= thr} or bucket_items
+        max_half = max(w + h for (w, h), n in main_items.items()) / 2
+        derived = max(64, int(max_half) // 64 * 64)
         info["resolution"] = f"{derived}x{derived}（分桶推算）"
         if meta_reso and meta_reso != (derived, derived):
             info["resolution"] += f"；元数据标注 {meta_reso[0]}x{meta_reso[1]}"
