@@ -530,35 +530,32 @@ def inspect_one(path):
                 })
     info["datasets"] = ds_list
 
-    # 分桶主力桶：bucket_info.buckets 里出现次数最高的分辨率（比 modelspec 默认值可信）
-    def main_bucket(ds_list):
-        best, best_n = None, -1
-        for ds in ds_list:
-            bi = ds.get("bucket_info") or {}
-            buckets = bi.get("buckets") if isinstance(bi.get("buckets"), dict) else {}
-            for b in buckets.values():
+    # 分桶统计：(w,h)->图片数。顶层 ss_bucket_info 或 subset.bucket_info（Anima 训练器）都可能是 JSON 字符串
+    def collect_buckets(sources):
+        items = {}
+        for bi in sources:
+            if isinstance(bi, str):
                 try:
-                    n = int(b.get("count") or 0)
+                    bi = json.loads(bi)
+                except json.JSONDecodeError:
+                    bi = None
+            buckets = bi.get("buckets", {}) if isinstance(bi, dict) else {}
+            for b in buckets.values() if isinstance(buckets, dict) else []:
+                try:
                     res = b.get("resolution")
-                except (TypeError, ValueError):
+                    n = int(b.get("count") or 0)
+                except (TypeError, ValueError, AttributeError):
                     continue
-                if res and isinstance(res, (list, tuple)) and len(res) == 2 and n > best_n:
-                    best, best_n = res, n
-        return best, best_n
+                if res and isinstance(res, (list, tuple)) and len(res) == 2 and n > 0:
+                    try:
+                        k = (int(res[0]), int(res[1]))
+                    except (TypeError, ValueError):
+                        continue
+                    items[k] = items.get(k, 0) + n
+        return items
 
-    info["resolution"] = safe_get(meta, "ss_resolution")
-    if info["resolution"] is None:
-        for ds in ds_list:
-            if ds["resolution"]:
-                info["resolution"] = "x".join(str(x) for x in ds["resolution"])
-                break
-    if info["resolution"] is None:
-        res, n = main_bucket(ds_list)
-        if res:
-            info["resolution"] = f"{res[0]}x{res[1]}（分桶主力，{n} 张图）"
-    # modelspec.resolution 常是训练器写入规范时的默认占位（如 1024x1024），仅作最后回退
-    if info["resolution"] is None:
-        info["resolution"] = safe_get(meta, "modelspec.resolution")
+    bucket_items = collect_buckets([safe_get(meta, "ss_bucket_info")]
+                                   + [ds.get("bucket_info") for ds in ds_list])
 
     info["bucket_info"] = safe_get(meta, "ss_bucket_info")
     if info["bucket_info"] is None:
@@ -566,6 +563,43 @@ def inspect_one(path):
             if ds["bucket_info"]:
                 info["bucket_info"] = ds["bucket_info"]
                 break
+    if isinstance(info["bucket_info"], str):
+        try:
+            info["bucket_info"] = json.loads(info["bucket_info"])
+        except json.JSONDecodeError:
+            info["bucket_info"] = None
+
+    def parse_reso(val):
+        """'(1024, 1024)' / '1024x1024' -> (1024, 1024) 或 None。"""
+        import re
+        if not val:
+            return None
+        m = re.findall(r"\d+", str(val))
+        if len(m) >= 2:
+            return (int(m[0]), int(m[1]))
+        return None
+
+    # 分辨率：优先由分桶推算（按图片数加权的 w+h 平均 / 2，取 64 的倍数），
+    # 比元数据/默认占位可信；无分桶时回退 ss_resolution → ss_datasets → modelspec
+    meta_reso = parse_reso(safe_get(meta, "ss_resolution"))
+    if bucket_items:
+        tot_n = sum(bucket_items.values())
+        avg_half = sum((w + h) * n for (w, h), n in bucket_items.items()) / tot_n / 2
+        derived = max(64, int(round(avg_half / 64)) * 64)
+        info["resolution"] = f"{derived}x{derived}（分桶推算）"
+        if meta_reso and meta_reso != (derived, derived):
+            info["resolution"] += f"；元数据标注 {meta_reso[0]}x{meta_reso[1]}"
+    elif meta_reso:
+        info["resolution"] = f"{meta_reso[0]}x{meta_reso[1]}"
+    else:
+        info["resolution"] = None
+        for ds in ds_list:
+            if ds["resolution"]:
+                info["resolution"] = "x".join(str(x) for x in ds["resolution"])
+                break
+        # modelspec.resolution 常是训练器写入规范时的默认占位（如 1024x1024），仅作最后回退
+        if info["resolution"] is None:
+            info["resolution"] = safe_get(meta, "modelspec.resolution")
 
     info["clip_skip"] = safe_get(meta, "ss_clip_skip")
     info["max_token_length"] = to_int(safe_get(meta, "ss_max_token_length"))
