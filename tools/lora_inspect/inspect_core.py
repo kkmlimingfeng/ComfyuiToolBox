@@ -201,6 +201,20 @@ def detect_base_model(meta):
         return "MOSS-Image"
     if "anima" in hay:
         return "Anima"
+    # Illustrious 系：底模文件名/base_model_version 带明确标记（如 Illustrious-XL-v1.0）
+    if "illustrious" in hay:
+        return "Illustrious"
+    if "noob" in hay:
+        return "NoobAI（Illustrious 系）"
+    if "pony" in hay:
+        return "Pony"
+    if "flux" in hay:
+        return "FLUX"
+    # SDXL / SD1.5 架构兜底
+    if "sdxl" in hay or "stable-diffusion-xl" in hay:
+        return "SDXL"
+    if "sd_v1" in hay or "stable-diffusion-v1" in hay:
+        return "SD 1.5"
     return ""
 
 
