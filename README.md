@@ -259,10 +259,9 @@ run.bat
 数据由 `tools/label_shop/build_data.py` 从原始数据集构建（含断点续跑的批量机翻），仓库直接附带成品数据，开箱即用：
 
 - `tags_merged.csv`：Danbooru 主数据（15.2 万行，分类 + 全量补翻，zh 无空白，画师名统一标注「画师」）；同时存在于 Anima 词表的标签带 `gelbooru` 来源标记
-- `tags_merged_anima.csv`：Anima 官方词表（13.7 万行，`anima-2.9B-preview-V1` 全量标签）。中文翻译优先采用社区通用译名库 [danbooru-tags-data-zh](https://huggingface.co/datasets/ame-la/danbooru-tags-data-zh)（截至 2026-08、图数 > 50 的标签），其余回退到 Danbooru 主数据译名；画师统一标注「画师」，泛用标签沿用本地分类体系；同时存在 danbooru 的标签带 `db` 来源标记
-- `tags_merged_anima_todo.csv`：Anima 词表中暂无现成译名的部分（约 1.4 万行， Gelbooru 旧拼写角色/作品与 Anima 专属词），zh / zh_mt 留空待补；仅本地使用，不随仓库分发
+- `tags_merged_anima.csv`：Anima 官方词表（13.7 万行，`anima-2.9B-preview-V1` 全量标签）。中文翻译优先采用社区通用译名库 [danbooru-tags-data-zh](https://huggingface.co/datasets/ame-la/danbooru-tags-data-zh)（截至 2026-08、图数 > 50 的标签），其余回退到 Danbooru 主数据译名；画师统一标注「画师」，泛用标签沿用本地分类体系；同时存在 danbooru 的标签带 `db` 来源标记；非画师行的 zh_mt 已由 HY-MT 模型批量补翻完成
 
-三份数据格式一致，均支持 danbooru / v2 / v3 / gelbooru 四个来源徽章与筛选，可在页面顶栏即时切换（编辑写回当前选中的文件）。
+两份数据格式一致，均支持 danbooru / v2 / v3 / gelbooru 四个来源徽章与筛选，可在页面顶栏即时切换（编辑写回当前选中的文件）。
 
 <!-- 截图预留：docs/images/label_shop-detail.png -->
 
@@ -409,8 +408,7 @@ ComfyUI-Toolbox/
         ├── manifest.json
         ├── run.bat
         ├── tags_merged.csv        # 成品标签数据（分类 + 全量补翻 + gelbooru 来源标记）
-        ├── tags_merged_anima.csv  # Anima 官方词表数据源（含社区通用译名）
-        └── tags_merged_anima_todo.csv  # Anima 词表待翻译部分（仅本地，不入库）
+        └── tags_merged_anima.csv  # Anima 官方词表数据源（含社区通用译名）
 ```
 
 ---
