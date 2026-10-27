@@ -579,18 +579,24 @@ def inspect_one(path):
             return (int(m[0]), int(m[1]))
         return None
 
-    # 分辨率：括号外为元数据原本读取的分辨率（无元数据时取有效桶中 w+h 最大桶的实际尺寸），
+    # 分辨率：括号外固定为元数据分辨率字段的读值（ss_resolution → ss_datasets → modelspec），
     # 括号内为分桶推算的训练分辨率（有效桶 = 图片数 ≥ 总数 1%，取 max(w+h)/2 向下取 64 倍数）
     meta_reso = parse_reso(safe_get(meta, "ss_resolution"))
+    if meta_reso is None:
+        for ds in ds_list:
+            if ds["resolution"]:
+                meta_reso = parse_reso(ds["resolution"])
+                if meta_reso:
+                    break
+    if meta_reso is None:
+        meta_reso = parse_reso(safe_get(meta, "modelspec.resolution"))
     if bucket_items:
         tot_n = sum(bucket_items.values())
         thr = max(2, tot_n // 100)
         main_items = {k: n for k, n in bucket_items.items() if n >= thr} or bucket_items
         max_sum = max(w + h for (w, h), n in main_items.items())
-        bw, bh = max(((k, n) for k, n in main_items.items() if k[0] + k[1] == max_sum),
-                     key=lambda x: x[1])[0]
         derived = max(64, (max_sum // 2) // 64 * 64)
-        outer = f"{meta_reso[0]}x{meta_reso[1]}" if meta_reso else f"{bw}x{bh}"
+        outer = f"{meta_reso[0]}x{meta_reso[1]}" if meta_reso else "未标注"
         info["resolution"] = f"{outer}（分桶推算 {derived}x{derived}）"
     elif meta_reso:
         info["resolution"] = f"{meta_reso[0]}x{meta_reso[1]}"
