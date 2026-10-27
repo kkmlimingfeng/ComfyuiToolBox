@@ -579,18 +579,18 @@ def inspect_one(path):
             return (int(m[0]), int(m[1]))
         return None
 
-    # 分辨率：优先由分桶推算——训练分辨率是分桶的上界，取有效桶（图片数 ≥ 总数 1%）
-    # 中 w+h 的最大值 / 2，取 64 的倍数；排除孤例桶防止极端尺寸拉偏
+    # 分辨率：优先由分桶推算——主值取有效桶（图片数 ≥ 总数 1%）中 w+h 最大的桶的实际尺寸，
+    # 括号内为推算的训练分辨率（max(w+h)/2 取 64 的倍数）；排除孤例桶防止极端尺寸拉偏
     meta_reso = parse_reso(safe_get(meta, "ss_resolution"))
     if bucket_items:
         tot_n = sum(bucket_items.values())
         thr = max(2, tot_n // 100)
         main_items = {k: n for k, n in bucket_items.items() if n >= thr} or bucket_items
-        max_half = max(w + h for (w, h), n in main_items.items()) / 2
-        derived = max(64, int(max_half) // 64 * 64)
-        info["resolution"] = f"{derived}x{derived}（分桶推算）"
-        if meta_reso and meta_reso != (derived, derived):
-            info["resolution"] += f"；元数据标注 {meta_reso[0]}x{meta_reso[1]}"
+        max_sum = max(w + h for (w, h), n in main_items.items())
+        bw, bh = max(((k, n) for k, n in main_items.items() if k[0] + k[1] == max_sum),
+                     key=lambda x: x[1])[0]
+        derived = max(64, (max_sum // 2) // 64 * 64)
+        info["resolution"] = f"{bw}x{bh}（分桶推算 {derived}x{derived}）"
     elif meta_reso:
         info["resolution"] = f"{meta_reso[0]}x{meta_reso[1]}"
     else:
