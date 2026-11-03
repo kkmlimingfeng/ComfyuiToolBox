@@ -1,7 +1,7 @@
 {
   "id": "img2prompt",
   "group": "本地工具箱",
-  "name": "Krea2提示词反推",
+  "name": "自然语言提示词反推",
   "icon": "🖼️",
   "port": 7867,
   "script": "app.py",

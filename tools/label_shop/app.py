@@ -296,7 +296,8 @@ def load_tags():
                         "sub": (r.get("sub") or "").strip(),
                         "a": [x for x in (r.get("aliases") or "").split("|") if x],
                         "db": "db" in src, "v2": "v2" in src, "v3": "v3" in src,
-                        "gb": "gelbooru" in src, "src0": src,
+                        "gb": "gelbooru" in src or "gb" in src.split(","),
+                        "src0": src,
                         "note": (r.get("note") or "").strip(),
                     })
             for t in tags:
@@ -1012,7 +1013,7 @@ def save_merged():
         w.writerow(["name", "count", "cat", "sub", "zh", "zh_mt", "aliases", "sources", "note"])
         for t in _TAGS:
             flags = [k for k, on in (("db", t["db"]), ("v2", t["v2"]), ("v3", t["v3"]),
-                                     ("gb", t.get("gb"))) if on]
+                                     ("gelbooru", t.get("gb"))) if on]
             if "anima" in (t.get("src0") or ""):   # Anima 词表数据源：保留 anima 标记
                 flags = ["anima"] + flags
             src = ",".join(flags)

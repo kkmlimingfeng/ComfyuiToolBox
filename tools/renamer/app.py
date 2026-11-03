@@ -3,6 +3,7 @@
 批量文件改名（网页版）
 - 追加模式：img1.txt -> img1 (realesrgan-x4plus-anime s1024).txt
 - 删除模式：反向恢复原名
+- 位置可选：文件名末尾（后缀）或文件名开头（前缀）
 支持：指定文件夹 / 文件后缀过滤 / 预览 / 幂等跳过 / 防覆盖。
 端口：7865
 """
@@ -25,9 +26,10 @@ def no_store(resp):
     return resp
 
 
-def plan_renames(folder, extension, suffix, mode):
+def plan_renames(folder, extension, s, mode, position="suffix"):
     """枚举目标文件，返回 (plans, skipped)。
-    plans: [(旧名, 新名)]；skipped: [(旧名, 原因)]"""
+    plans: [(旧名, 新名)]；skipped: [(旧名, 原因)]。
+    position: suffix=字符串追加在扩展名前（后缀），prefix=字符串加在文件名开头（前缀）"""
     plans, skipped = [], []
     extension = extension.lower()
 
@@ -40,23 +42,28 @@ def plan_renames(folder, extension, suffix, mode):
         if ext.lower() != extension:
             continue
 
+        if position == "prefix":
+            has = stem.startswith(s)
+        else:
+            has = stem.endswith(s)
+
         if mode == "add":
-            if stem.endswith(suffix):
+            if has:
                 skipped.append((name, "已包含该字符串（幂等跳过）"))
                 continue
-            new_name = stem + suffix + ext
+            new_stem = (s + stem) if position == "prefix" else (stem + s)
         elif mode == "remove":
-            if not stem.endswith(suffix):
+            if not has:
                 skipped.append((name, "文件名不含该字符串"))
                 continue
-            new_stem = stem[: -len(suffix)]
+            new_stem = stem[len(s):] if position == "prefix" else stem[: -len(s)]
             if not new_stem:
                 skipped.append((name, "删除后文件名为空"))
                 continue
-            new_name = new_stem + ext
         else:
             raise ValueError(f"未知模式：{mode!r}")
 
+        new_name = new_stem + ext
         if os.path.exists(os.path.join(folder, new_name)):
             skipped.append((name, f"目标文件已存在：{new_name}"))
             continue
@@ -143,6 +150,11 @@ PAGE = r"""<!doctype html>
         <option value="add">追加字符串</option>
         <option value="remove">删除字符串（还原）</option>
       </select>
+      <label style="width:60px">位置</label>
+      <select id="position">
+        <option value="suffix" selected>文件名末尾（后缀）</option>
+        <option value="prefix">文件名开头（前缀）</option>
+      </select>
     </div>
     <div class="row">
       <label>字符串</label>
@@ -184,12 +196,17 @@ function updateExample() {
     const ext = document.getElementById('ext').value || '.txt';
     const s = document.getElementById('suffix').value;
     const mode = document.getElementById('mode').value;
+    const pos = document.getElementById('position').value;
     const name = 'img1';
-    const ex = mode === 'add' ? (name + ext + ' → ' + name + s + ext)
-                              : (name + s + ext + ' → ' + name + ext);
+    const ex = mode === 'add'
+        ? (pos === 'prefix' ? (name + ext + ' → ' + s + name + ext)
+                            : (name + ext + ' → ' + name + s + ext))
+        : (pos === 'prefix' ? (s + name + ext + ' → ' + name + ext)
+                            : (name + s + ext + ' → ' + name + ext));
     document.getElementById('example').innerText = '示例：' + ex;
 }
 document.getElementById('mode').onchange = updateExample;
+document.getElementById('position').onchange = updateExample;
 document.getElementById('suffix').oninput = updateExample;
 updateExample();
 
@@ -204,7 +221,8 @@ function args() {
         folder: document.getElementById('folder').value.trim(),
         ext: document.getElementById('ext').value.trim(),
         suffix: document.getElementById('suffix').value,
-        mode: document.getElementById('mode').value
+        mode: document.getElementById('mode').value,
+        position: document.getElementById('position').value
     };
 }
 
@@ -289,25 +307,28 @@ def _check(data):
     ext = (data.get("ext") or "").strip()
     suffix = data.get("suffix") or ""
     mode = data.get("mode") or ""
+    position = data.get("position") or "suffix"
     if not os.path.isdir(folder):
-        return None, None, None, None, f"文件夹不存在：{folder}"
+        return None, None, None, None, None, f"文件夹不存在：{folder}"
     if not ext.startswith("."):
-        return None, None, None, None, "文件后缀需要以点开头，例如 .txt"
+        return None, None, None, None, None, "文件后缀需要以点开头，例如 .txt"
     if mode not in ("add", "remove"):
-        return None, None, None, None, "模式只支持 add / remove"
-    if mode == "add" and not suffix:
-        return None, None, None, None, "追加模式需要填写要追加的字符串"
-    return folder, ext, suffix, mode, None
+        return None, None, None, None, None, "模式只支持 add / remove"
+    if position not in ("suffix", "prefix"):
+        return None, None, None, None, None, "位置只支持 suffix / prefix"
+    if not suffix:
+        return None, None, None, None, None, "需要填写要追加/删除的字符串"
+    return folder, ext, suffix, mode, position, None
 
 
 @app.route("/api/preview", methods=["POST"])
 def api_preview():
     data = request.get_json(silent=True) or {}
-    folder, ext, suffix, mode, err = _check(data)
+    folder, ext, suffix, mode, position, err = _check(data)
     if err:
         return {"ok": False, "error": err}
     try:
-        plans, skipped = plan_renames(folder, ext, suffix, mode)
+        plans, skipped = plan_renames(folder, ext, suffix, mode, position)
         return {"ok": True, "plans": plans, "skipped": skipped}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -316,11 +337,11 @@ def api_preview():
 @app.route("/api/execute", methods=["POST"])
 def api_execute():
     data = request.get_json(silent=True) or {}
-    folder, ext, suffix, mode, err = _check(data)
+    folder, ext, suffix, mode, position, err = _check(data)
     if err:
         return {"ok": False, "error": err}
     try:
-        plans, skipped = plan_renames(folder, ext, suffix, mode)
+        plans, skipped = plan_renames(folder, ext, suffix, mode, position)
         done = []
         for old_name, new_name in plans:
             os.rename(os.path.join(folder, old_name), os.path.join(folder, new_name))

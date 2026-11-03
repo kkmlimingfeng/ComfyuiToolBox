@@ -147,6 +147,17 @@ def main():
     shop.load_tags()
     tags = sorted(shop._TAGS, key=lambda t: -t["c"])
 
+    # gelbooru 标记：同时出现在 Anima（Gelbooru 系）词表里的标签补 gelbooru 来源，
+    # 与 tags_merged_anima.csv 的 sources 约定一致（完整单词，app.py 按 "gelbooru" 识别）
+    anima_csv = os.path.join(HERE, "files", "anima-2.9B-preview-V1.csv")
+    anima_names = set()
+    if os.path.isfile(anima_csv):
+        with open(anima_csv, encoding="utf-8-sig", errors="replace") as f:
+            for r in csv.reader(f):
+                if r and r[0].strip():
+                    anima_names.add(r[0].strip())
+    print(f"[build] Anima 词表 {len(anima_names)} 条（用于 gelbooru 来源标记）")
+
     # 断点续跑：继承已有 tags_merged.csv 里的机翻结果
     old_mt = {}
     if os.path.isfile(MERGED):
@@ -166,7 +177,8 @@ def main():
             "zh": t["zh"],
             "zh_mt": old_mt.get(t["n"], ""),
             "aliases": "|".join(t["a"]),
-            "sources": ",".join(x for x, k in (("db", t["db"]), ("v2", t["v2"]), ("v3", t["v3"])) if k),
+            "sources": ",".join(x for x, k in (("db", t["db"]), ("v2", t["v2"]), ("v3", t["v3"]),
+                                               ("gelbooru", t["n"] in anima_names)) if k),
             "note": t.get("note", ""),
         })
     if shard_n:

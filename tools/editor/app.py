@@ -154,7 +154,7 @@ def _detect_device(model):
     return llm, device
 
 def _load_translator():
-    """启动时加载 Hy-MT2 翻译模型：有 GPU 自动 GPU 加速，无 GPU 自动 CPU 运行。"""
+    """按需加载 Hy-MT2 翻译模型（第一次点翻译时触发）：有 GPU 自动 GPU 加速，无 GPU 自动 CPU 运行。"""
     global _mt_model, _mt_device_info
     if not _MT_OK:
         _mt_device_info = "未安装 llama-cpp-python"
@@ -183,8 +183,24 @@ def _load_translator():
         print(f"[translate] 加载失败: {e}")
         return False
 
+def _unload_translator():
+    """关闭翻译时立刻卸载翻译模型，释放显存/内存。"""
+    global _mt_model, _mt_device_info
+    with _mt_lock:
+        if _mt_model is None:
+            return
+        _mt_model = None
+        import gc
+        gc.collect()
+        _mt_device_info = "未加载"
+        print("[translate] 翻译模型已卸载，显存已释放")
+
 def translate_text(text):
     """按当前配置的目标语言翻译一段文本。"""
+    if _mt_model is None and text:
+        with _mt_lock:  # 懒加载：第一次点翻译时才加载模型
+            if _mt_model is None:
+                _load_translator()
     if _mt_model is None or not text:
         return ""
     try:
@@ -1036,11 +1052,12 @@ EDIT_HTML = """
         async function doTranslate() {
             const btn = document.getElementById('translateBtn');
             if (_zhOn) {
-                // 关闭
+                // 关闭：清空译文并通知服务端立刻卸载翻译模型
                 _zhOn = false;
                 sessionStorage.setItem("zhOn", "0");
                 document.querySelectorAll('.tag-zh').forEach(el => el.remove());
                 if (btn) { btn.innerText = translateBtnText(false); btn.classList.remove('active'); }
+                fetch('/api/translate_unload', { method: 'POST' }).catch(() => {});
                 return;
             }
             _zhOn = true;
@@ -1584,6 +1601,11 @@ def api_translate():
             out[t] = zh
     return {"ok": _mt_model is not None, "translations": out}
 
+@app.route("/api/translate_unload", methods=["POST"])
+def api_translate_unload():
+    _unload_translator()
+    return {"ok": True, "loaded": _mt_model is not None}
+
 @app.route("/api/translate_config", methods=["GET"])
 def api_get_tcfg():
     return {"ok": True, "config": _translate_cfg,
@@ -1671,7 +1693,6 @@ def api_reorder_tags():
     return {"ok": True}
 
 if __name__ == "__main__":
-    _load_translator()
     time.sleep(0.5)
     if os.environ.get("TOOL_NO_BROWSER") != "1":  # 被门户拉起时不自动开浏览器
         webbrowser.open("http://127.0.0.1:7866")

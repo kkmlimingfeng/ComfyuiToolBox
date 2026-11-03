@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Krea2 提示词反推工具（单文件版）
+自然语言提示词反推工具（单文件版）
 - 上传单张图片或整个文件夹，用本地 Qwen3-VL-4B-Instruct-Uncensored（GGUF）反推文生图提示词（支持中文/英文）
 - llama.cpp 推理（llama-cpp-python），主模型 + mmproj 视觉投影，自动 GPU offload
 - 模型放在统一启动器根目录 model/ 下，点击页面"加载模型"后才载入显存，卸载即释放
+- 系统提示词支持多方案：页面可切换 / 新增 / 删除方案，离线保存在 prompts.json
 - 浏览器自动打开 http://127.0.0.1:7867
 """
 
@@ -124,31 +125,57 @@ _state = {"status": "unloaded",
 _infer_lock = threading.Lock()      # llama.cpp 同一上下文不支持并发推理，必须串行化
 _model_op_lock = threading.Lock()   # 串行化 加载/卸载 操作
 
-# ---- 系统提示词（可在线编辑，持久化到 system_prompt.json）----
-_sys_prompt = DEFAULT_SYS_PROMPT
+# ---- 系统提示词多方案（可切换 / 新增 / 删除，离线保存在 prompts.json）----
+PRESETS_FILE = os.path.join(BASE_DIR, "prompts.json")
+BUILTIN_PRESETS = {          # 出厂方案（"恢复默认"按方案名还原，自定义方案还原为 DEFAULT_SYS_PROMPT）
+    "默认人设": DEFAULT_SYS_PROMPT,
+    "中文结构化": INSTRUCTION_ZH,
+    "英文提示词": INSTRUCTION_EN,
+}
+_prompt_presets = dict(BUILTIN_PRESETS)   # {方案名: 系统提示词内容}
+_prompt_current = "默认人设"
 
 
-def _load_sys_prompt():
-    global _sys_prompt
+def _load_presets():
+    """加载 prompts.json；旧版单方案 system_prompt.json 存在时迁移为默认方案内容"""
+    global _prompt_presets, _prompt_current
+    _prompt_presets = dict(BUILTIN_PRESETS)
+    _prompt_current = "默认人设"
     try:
-        if os.path.isfile(SYS_FILE):
+        if os.path.isfile(PRESETS_FILE):
+            with open(PRESETS_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            p = d.get("presets")
+            if isinstance(p, dict) and p:
+                cleaned = {str(k).strip(): str(v)
+                           for k, v in p.items() if str(k).strip()}
+                if cleaned:
+                    _prompt_presets = cleaned
+                    cur = str(d.get("current") or "").strip()
+                    _prompt_current = cur if cur in cleaned else next(iter(cleaned))
+        elif os.path.isfile(SYS_FILE):
             with open(SYS_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
             if isinstance(d.get("prompt"), str) and d["prompt"].strip():
-                _sys_prompt = d["prompt"]
+                _prompt_presets["默认人设"] = d["prompt"]
     except Exception as e:
-        print(f"[sys] 读取系统提示词失败: {e}")
+        print(f"[sys] 读取提示词方案失败: {e}")
 
 
-def _save_sys_prompt():
+def _save_presets():
     try:
-        with open(SYS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"prompt": _sys_prompt}, f, ensure_ascii=False, indent=2)
+        with open(PRESETS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"current": _prompt_current, "presets": _prompt_presets},
+                      f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[sys] 保存系统提示词失败: {e}")
+        print(f"[sys] 保存提示词方案失败: {e}")
 
 
-_load_sys_prompt()
+def _current_sys_prompt():
+    return _prompt_presets.get(_prompt_current, DEFAULT_SYS_PROMPT)
+
+
+_load_presets()
 
 
 # ---- 显存查询（NVML，不依赖 torch）----
@@ -265,7 +292,7 @@ def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int = DEFAUL
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
     messages = [
-        {"role": "system", "content": _sys_prompt},
+        {"role": "system", "content": _current_sys_prompt()},
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             {"type": "text", "text": INSTRUCTIONS.get(lang, INSTRUCTION_ZH)},
@@ -312,7 +339,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Krea2提示词反推</title>
+<title>自然语言提示词反推</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -375,6 +402,27 @@ PAGE = r"""<!doctype html>
              background:var(--inner); color:var(--text); border:1px solid var(--btn-border);
              border-radius:8px; padding:10px; font-size:13px; line-height:1.5;
              font-family:inherit; }
+  .pmask { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:1000;
+           display:flex; align-items:center; justify-content:center; }
+  .pmask[hidden] { display:none; }   /* display:flex 会覆盖 hidden 属性，需显式还原 */
+  .pmodal { background:var(--card); border:1px solid var(--border); border-radius:12px;
+            width:min(560px, 92vw); max-height:70vh; display:flex; flex-direction:column;
+            padding:14px; }
+  .phead { display:flex; justify-content:space-between; align-items:center;
+           font-size:14px; font-weight:600; margin-bottom:10px; }
+  #presetList { overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+  .pitem { display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer;
+           border:1px solid var(--btn-border); border-radius:8px; font-size:13px; }
+  .pitem:hover { background:var(--inner); }
+  .pitem.cur { border-color:#4a9eff; }
+  .pitem .pname { font-weight:600; white-space:nowrap; }
+  .pitem .pprev { color:var(--muted); font-size:12px; overflow:hidden;
+                  text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .pitem .pdel { padding:1px 8px; font-size:12px; flex:none; }
+  .pnew { display:flex; gap:8px; margin-top:10px; }
+  .pnew input { flex:1; background:var(--inner); color:var(--text);
+                border:1px solid var(--btn-border); border-radius:8px; padding:7px 10px;
+                font-size:13px; font-family:inherit; }
   .theme-toggle { position:fixed; bottom:20px; right:20px; font-size:24px; cursor:pointer;
                   background:transparent; border:none; padding:6px 10px; border-radius:6px;
                   transition:background .2s; z-index:999; }
@@ -384,7 +432,7 @@ PAGE = r"""<!doctype html>
 </head>
 <body>
 <div class="wrap">
-  <h1>Krea2提示词反推 <span id="badge" class="unloaded">模型未加载</span></h1>
+  <h1>自然语言提示词反推 <span id="badge" class="unloaded">模型未加载</span></h1>
   <div class="sub">GGUF 视觉模型（llama.cpp）本地推理 · 反推文生图提示词 · 可切换模型与系统提示词</div>
 
 
@@ -436,11 +484,26 @@ PAGE = r"""<!doctype html>
     <div class="syshead">
       <span>系统提示词（模型人设，每次反推都会生效，切换模型共用）</span>
       <span>
+        <button id="presetBtn" title="点击展开提示词方案列表">方案 ▾</button>
         <button id="sysSave">保存</button>
         <button id="sysReset">恢复默认</button>
       </span>
     </div>
     <textarea id="sysText" spellcheck="false"></textarea>
+  </div>
+</div>
+
+<div id="presetMask" class="pmask" hidden>
+  <div class="pmodal">
+    <div class="phead">
+      <span>提示词方案</span>
+      <button id="presetClose">✕</button>
+    </div>
+    <div id="presetList"></div>
+    <div class="pnew">
+      <input id="presetName" placeholder="输入新方案名称">
+      <button id="presetAdd" title="以当前编辑框内容创建新方案">新增（取当前编辑内容）</button>
+    </div>
   </div>
 </div>
 <button class="theme-toggle" id="themeBtn">💡</button>
@@ -513,35 +576,91 @@ setInterval(poll, 1500); poll();
   } catch (e) {}
 })();
 
-// ---- 系统提示词 ----
-(async function initSys() {
-  try {
-    const r = await fetch('/api/system_prompt'); const j = await r.json();
-    $('sysText').value = j.prompt;
-  } catch (e) {}
-})();
+// ---- 系统提示词多方案 ----
+async function loadPresets() {
+  const r = await fetch('/api/prompts'); const j = await r.json();
+  if (!j.ok) return;
+  const cur = (j.presets || []).find(p => p.current);
+  if (cur) $('sysText').value = cur.prompt;
+  $('presetBtn').textContent = '方案：' + (cur ? cur.name : '—') + ' ▾';
+}
+(async function initSys() { try { await loadPresets(); } catch (e) {} })();
+
+async function presetAction(body) {
+  const r = await fetch('/api/prompts', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return await r.json();
+}
 $('sysSave').onclick = async () => {
   const btn = $('sysSave');
   try {
-    const r = await fetch('/api/system_prompt', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: $('sysText').value }) });
-    const j = await r.json();
-    btn.textContent = j.ok ? '已保存' : '保存失败';
-    if (j.ok) $('sysText').value = j.prompt;
+    const j = await presetAction({ action: 'save', prompt: $('sysText').value });
+    btn.textContent = j.ok ? '已保存' : (j.error || '保存失败');
   } catch (e) { btn.textContent = '保存失败'; }
   setTimeout(() => btn.textContent = '保存', 1200);
 };
 $('sysReset').onclick = async () => {
   const btn = $('sysReset');
   try {
-    const r = await fetch('/api/system_prompt', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reset: true }) });
-    const j = await r.json();
-    if (j.ok) $('sysText').value = j.prompt;
-    btn.textContent = j.ok ? '已恢复' : '失败';
+    const j = await presetAction({ action: 'reset' });
+    if (j.ok) { $('sysText').value = j.prompt; await loadPresets(); }
+    btn.textContent = j.ok ? '已恢复' : (j.error || '失败');
   } catch (e) { btn.textContent = '失败'; }
   setTimeout(() => btn.textContent = '恢复默认', 1200);
+};
+
+// ---- 方案弹窗 ----
+function renderPresetList() {
+  const wrap = $('presetList'); wrap.innerHTML = '';
+  for (const p of window.__presets || []) {
+    const row = document.createElement('div');
+    row.className = 'pitem' + (p.current ? ' cur' : '');
+    const nm = document.createElement('span'); nm.className = 'pname';
+    nm.textContent = (p.current ? '✔ ' : '') + p.name;
+    const pv = document.createElement('span'); pv.className = 'pprev';
+    pv.textContent = p.prompt.replace(/\s+/g, ' ').slice(0, 60);
+    row.append(nm, pv);
+    row.onclick = async () => {
+      const j = await presetAction({ action: 'select', name: p.name });
+      if (j.ok) {
+        $('sysText').value = j.prompt;
+        await loadPresets(); renderPresetList();
+      }
+    };
+    if (!p.current) {
+      const del = document.createElement('button'); del.className = 'pdel';
+      del.textContent = '删除';
+      del.onclick = async e => {
+        e.stopPropagation();
+        if (!confirm('删除方案「' + p.name + '」？')) return;
+        const j = await presetAction({ action: 'delete', name: p.name });
+        if (j.ok) { await loadPresets(); renderPresetList(); }
+        else alert(j.error || '删除失败');
+      };
+      row.appendChild(del);
+    }
+    wrap.appendChild(row);
+  }
+}
+$('presetBtn').onclick = async () => {
+  try {
+    const r = await fetch('/api/prompts'); const j = await r.json();
+    window.__presets = j.presets || [];
+    renderPresetList();
+    $('presetMask').hidden = false;
+  } catch (e) {}
+};
+$('presetClose').onclick = () => { $('presetMask').hidden = true; };
+$('presetMask').onclick = e => { if (e.target === $('presetMask')) $('presetMask').hidden = true; };
+$('presetAdd').onclick = async () => {
+  const name = $('presetName').value.trim();
+  if (!name) { alert('请先输入新方案名称'); return; }
+  const j = await presetAction({ action: 'new', name: name, prompt: $('sysText').value });
+  if (j.ok) {
+    $('presetName').value = '';
+    $('sysText').value = j.prompt;
+    await loadPresets(); renderPresetList();
+  } else alert(j.error || '新增失败');
 };
 
 // ---- 加载 / 卸载模型 ----
@@ -730,24 +849,52 @@ def api_unload():
     return jsonify({"ok": ok, "message": msg})
 
 
-@app.get("/api/system_prompt")
-def api_get_sys():
-    return jsonify({"ok": True, "prompt": _sys_prompt, "default": DEFAULT_SYS_PROMPT})
+@app.get("/api/prompts")
+def api_prompts():
+    """列出全部提示词方案（含当前选中项）"""
+    return jsonify({"ok": True, "current": _prompt_current,
+                    "presets": [{"name": n, "prompt": p, "current": n == _prompt_current}
+                                for n, p in _prompt_presets.items()]})
 
 
-@app.post("/api/system_prompt")
-def api_set_sys():
-    global _sys_prompt
-    data = request.get_json(silent=True) or {}
-    if data.get("reset"):
-        _sys_prompt = DEFAULT_SYS_PROMPT
-    else:
-        p = (data.get("prompt") or "").strip()
+@app.post("/api/prompts")
+def api_prompts_set():
+    """提示词方案操作：select 切换 / save 保存当前内容 / new 新增 / delete 删除 / reset 恢复出厂"""
+    global _prompt_current, _prompt_presets
+    d = request.get_json(silent=True) or {}
+    act = d.get("action")
+    if act == "select":
+        name = (d.get("name") or "").strip()
+        if name not in _prompt_presets:
+            return jsonify({"ok": False, "error": "方案不存在"}), 400
+        _prompt_current = name
+    elif act == "save":
+        p = (d.get("prompt") or "").strip()
         if not p:
-            return jsonify({"ok": False, "error": "系统提示词不能为空"}), 400
-        _sys_prompt = p
-    _save_sys_prompt()
-    return jsonify({"ok": True, "prompt": _sys_prompt})
+            return jsonify({"ok": False, "error": "提示词不能为空"}), 400
+        _prompt_presets[_prompt_current] = p
+    elif act == "new":
+        name = (d.get("name") or "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "方案名不能为空"}), 400
+        if name in _prompt_presets:
+            return jsonify({"ok": False, "error": "方案名已存在"}), 400
+        _prompt_presets[name] = (d.get("prompt") or "").strip() or DEFAULT_SYS_PROMPT
+        _prompt_current = name
+    elif act == "delete":
+        name = (d.get("name") or "").strip()
+        if name not in _prompt_presets:
+            return jsonify({"ok": False, "error": "方案不存在"}), 400
+        if name == _prompt_current:
+            return jsonify({"ok": False, "error": "不能删除当前选中的方案"}), 400
+        del _prompt_presets[name]
+    elif act == "reset":
+        _prompt_presets[_prompt_current] = BUILTIN_PRESETS.get(_prompt_current, DEFAULT_SYS_PROMPT)
+    else:
+        return jsonify({"ok": False, "error": "未知操作"}), 400
+    _save_presets()
+    return jsonify({"ok": True, "current": _prompt_current,
+                    "prompt": _prompt_presets[_prompt_current]})
 
 
 @app.post("/api/infer")

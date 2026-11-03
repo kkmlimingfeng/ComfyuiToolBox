@@ -22,6 +22,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -694,6 +695,52 @@ def _cl_interrogate(model_id, pil_img, gen_t, char_t, cfg):
 
 # ---------------------------------------------------------------- 自然语言打标 ---
 
+class _CompareStopped(Exception):
+    """对比/打标被用户停止（推理中途打断）"""
+
+
+def _unload_llama_now():
+    """立刻卸载当前 llama.cpp 模型并释放显存。"""
+    global _llama_model, _llama_key
+    with _llama_lock:
+        if _llama_model is not None:
+            _llama_model = None
+            _llama_key = None
+            import gc
+            gc.collect()
+            print("[nl] model unloaded to free VRAM")
+
+
+def _drop_tagger(model_id):
+    """卸载单个标签模型（WD14 / CL）的 onnx session，立刻释放显存/内存。"""
+    dropped = False
+    with _sess_lock:
+        if model_id in _sessions:
+            _sessions.pop(model_id, None)
+            dropped = True
+        if model_id in _cl_sessions:
+            _cl_sessions.pop(model_id, None)
+            dropped = True
+    if dropped:
+        import gc
+        gc.collect()
+        print(f"[tagger] unloaded {model_id} session to free VRAM")
+
+
+def _unload_taggers():
+    """卸载全部标签模型（WD14 / CL 的 onnxruntime session），立刻释放显存/内存。
+    只应在批量任务或对比结束后调用（任务开始前必须已结束，无并发使用）。"""
+    n = 0
+    with _sess_lock:
+        n = len(_sessions) + len(_cl_sessions)
+        _sessions.clear()
+        _cl_sessions.clear()
+    if n:
+        import gc
+        gc.collect()
+        print(f"[tagger] unloaded {n} onnx session(s) to free VRAM")
+
+
 _llama_model = None
 _llama_key = None          # (模型key, n_ctx) 二元组，切换上下文长度也会重载
 _llama_lock = threading.Lock()
@@ -707,8 +754,36 @@ DEFAULT_NL_PROMPT = (
 )
 
 
+def _free_vram_mb():
+    """查询 GPU 空闲显存（MB）。查不到（无 nvidia-smi / 无 GPU）返回 None。"""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
+        return int(out[0].strip())
+    except Exception:
+        return None
+
+
+def _try_free_sibling_vram():
+    """显存不够时，通知同套工具里占用显存的服务（反推提示词 7867）卸载模型。
+    同一台机器上两个进程无法同时各装一份 27B 模型，先释放再加载。"""
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:7867/api/unload", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=8) as r:
+            if r.status == 200:
+                print("[nl] 已通知「自然语言提示词反推」卸载模型以释放显存")
+                time.sleep(2.0)
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _load_llama(key, n_ctx=8192):
-    """加载 GGUF 视觉模型（key 形如 'gguf:模型名'），缓存键含上下文长度。"""
+    """加载 GGUF 视觉模型（key 形如 'gguf:模型名'），缓存键含上下文长度。
+    加载前检查空闲显存：不够时先自动释放反推提示词占用的模型，再加载。"""
     global _llama_model, _llama_key
     with _llama_lock:
         if _llama_model is not None and _llama_key == (key, n_ctx):
@@ -720,16 +795,57 @@ def _load_llama(key, n_ctx=8192):
         m = scan_nl_models().get(key)
         if not m:
             raise ValueError(f"未知模型: {key}")
+
+        # 加载前检查空闲显存：不够时先自动释放反推提示词占用的模型。
+        # 显存仍不够时 NVIDIA 驱动会触发系统内存回退（模型"看似"进了 GPU，
+        # 实际一半数据在内存里反复搬运，推理慢 10 倍以上），这里只警告不阻断。
+        need_mb = 0
+        for f in (m["model"], m["mmproj"]):
+            p = os.path.join(MODEL_DIR, f)
+            if os.path.isfile(p):
+                need_mb += os.path.getsize(p) / 1024 / 1024
+        kv_mb = int(n_ctx) * 0.16          # KV 缓存粗估（8k 上下文约 1.3 GB）
+        need_mb += kv_mb + 1024            # + 1 GB 安全余量
+        free_mb = _free_vram_mb()
+        if free_mb is not None and free_mb < need_mb:
+            _try_free_sibling_vram()
+            free_mb = _free_vram_mb()
+        if free_mb is not None and free_mb < need_mb:
+            print(f"[nl] 警告：显存不足（约需 {need_mb / 1024:.1f} GB，当前空闲 "
+                  f"{free_mb / 1024:.1f} GB），可能触发系统内存回退导致推理明显变慢")
+
+        import ctypes
         from llama_cpp import Llama
-        print(f"[nl] loading {m['model']} (n_ctx={n_ctx}) ...")
-        _llama_model = Llama(
-            model_path=os.path.join(MODEL_DIR, m["model"]),
-            mmproj_path=os.path.join(MODEL_DIR, m["mmproj"]),
-            n_gpu_layers=-1,
-            n_ctx=n_ctx,
-            flash_attn=True,
-            verbose=False,
-        )
+        from llama_cpp import llama_cpp as _lc
+
+        lines = []
+
+        @_lc.ggml_log_callback
+        def _cb(level, msg, user):
+            try:
+                lines.append(msg.decode("utf-8", "ignore"))
+            except Exception:
+                pass
+
+        old_cb = _lc.ggml_log_callback()
+        old_ud = ctypes.c_void_p()
+        try:
+            _lc.llama_log_get(ctypes.byref(old_cb), ctypes.byref(old_ud))
+        except Exception:
+            pass
+        _lc.llama_log_set(_cb, None)
+        try:
+            print(f"[nl] loading {m['model']} (n_ctx={n_ctx}) ...")
+            _llama_model = Llama(
+                model_path=os.path.join(MODEL_DIR, m["model"]),
+                mmproj_path=os.path.join(MODEL_DIR, m["mmproj"]),
+                n_gpu_layers=-1,
+                n_ctx=n_ctx,
+                flash_attn=True,
+                verbose=False,
+            )
+        finally:
+            _lc.llama_log_set(old_cb, old_ud)
         _llama_key = (key, n_ctx)
         # JoyCaption 内嵌模板不兼容多模态 content 列表，替换为等价的 Llama3 模板：
         # 改模板字符串 + 重新编译 jinja（构造时已预编译），并让解析缓存失效
@@ -738,10 +854,47 @@ def _load_llama(key, n_ctx=8192):
             h.chat_format = JOYCAPTION_CHAT_TEMPLATE
             h._change_chat_template(JOYCAPTION_CHAT_TEMPLATE)
             h._template_initialized = False
-        print("[nl] ready")
+        # 解析卸载层数，仅记录/警告，不阻断推理
+        off, total = None, None
+        for line in lines:
+            if "offloaded" in line and "layers" in line:
+                try:
+                    seg = line.split("offloaded")[1].split("layers")[0]
+                    off, total = (int(x.strip()) for x in seg.split("/"))
+                except Exception:
+                    off, total = None, None
+                break
+        if total and off is not None and off < total:
+            print(f"[nl] 警告：模型仅 {off}/{total} 层加载到 GPU，剩余层用 CPU/内存"
+                  f"回退推理，速度会明显变慢")
+        if off is not None:
+            print(f"[nl] ready · GPU（已卸载 {off}/{total} 层）")
+        else:
+            print("[nl] ready")
 
 
-def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192):
+def _fit_image_to_ctx(pil_img, n_ctx, prompt, max_tokens=512):
+    """按上下文容量自动缩小图片。
+    Qwen3-VL 每 28x28 像素约编码为 1 个视觉 token，图片 token 超过 n_ctx 时
+    llama.cpp 会报 Llama.eval(decode) 失败，这里按预算预先缩图。"""
+    w, h = pil_img.size
+    est = ((h + 27) // 28) * ((w + 27) // 28)
+    prompt_est = max(64, int(len(prompt) / 3))
+    budget = n_ctx - prompt_est - max_tokens - 128   # 扣掉提示词/生成长度/安全余量
+    if budget < 256:
+        budget = 256
+    if est <= budget:
+        return pil_img
+    scale = (budget / est) ** 0.5
+    nw = max(28, int(w * scale) // 28 * 28)
+    nh = max(28, int(h * scale) // 28 * 28)
+    print(f"[nl] image {w}x{h} (~{est} visual tokens) exceeds n_ctx={n_ctx}, "
+          f"shrunk to {nw}x{nh}")
+    return pil_img.resize((nw, nh))
+
+
+def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192,
+                    max_tokens=512, should_cancel=None):
     _load_llama(key, n_ctx)
     pil_img = pil_img.convert("RGB")
     try:
@@ -750,6 +903,7 @@ def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192):
         max_side = 1536
     if max_side > 0 and max(pil_img.size) > max_side:
         pil_img.thumbnail((max_side, max_side))
+    pil_img = _fit_image_to_ctx(pil_img, n_ctx, prompt, max_tokens)
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -760,9 +914,32 @@ def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192):
             {"type": "text", "text": prompt},
         ],
     }]
-    resp = _llama_model.create_chat_completion(
-        messages=messages, max_tokens=512, temperature=0.3, top_p=0.8, top_k=20)
-    text = (resp["choices"][0]["message"].get("content") or "").strip()
+    kw = dict(messages=messages, max_tokens=max_tokens, temperature=0.3,
+              top_p=0.8, top_k=20)
+    try:
+        if should_cancel is None:
+            resp = _llama_model.create_chat_completion(**kw)
+            text = (resp["choices"][0]["message"].get("content") or "").strip()
+        else:
+            # 流式逐 token 接收，用户点停止时立刻中断生成（close 内部即终止解码）
+            stream = _llama_model.create_chat_completion(**kw, stream=True)
+            parts = []
+            try:
+                for chunk in stream:
+                    if should_cancel():
+                        raise _CompareStopped()
+                    delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                    if delta.get("content"):
+                        parts.append(delta["content"])
+            finally:
+                stream.close()
+            text = "".join(parts).strip()
+    except _CompareStopped:
+        raise
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"推理失败（上下文 {n_ctx} 不足或显存溢出，请调大上下文长度、"
+            f"降低图片分辨率或换更小模型）：{e}") from e
     if "</think>" in text:
         text = text.split("</think>", 1)[1].strip()
     return text.strip('"').strip()
@@ -842,12 +1019,17 @@ def _run_job(cfg, model_cfg):
                         body = _nl_interrogate(
                             model, im, cfg.get("nl_prompt", ""),
                             max_side=cfg.get("nl_res", 1536),
-                            n_ctx=cfg.get("n_ctx", 8192))
+                            n_ctx=cfg.get("n_ctx", 8192),
+                            max_tokens=cfg.get("maxt", 512),
+                            should_cancel=lambda: _job["cancel"])
                 text = _append_prompts(prefix, suffix, body)
                 with open(txt, "w", encoding="utf-8") as f:
                     f.write(text)
                 with _job_lock:
                     _job["done"] += 1
+            except _CompareStopped:
+                # 用户中途停止：本张作废，跳出循环
+                break
             except Exception as e:
                 traceback.print_exc()
                 with _job_lock:
@@ -862,15 +1044,9 @@ def _run_job(cfg, model_cfg):
             _job["running"] = False
             _job["finished"] = True
             _job["current"] = ""
-        # NL 模型很占显存，跑完自动释放
-        global _llama_model, _llama_key
-        with _llama_lock:
-            if _llama_model is not None:
-                _llama_model = None
-                _llama_key = None
-                import gc
-                gc.collect()
-                print("[nl] model unloaded to free VRAM")
+        # 模型很占显存，跑完立刻全部释放（NL + 标签模型）
+        _unload_llama_now()
+        _unload_taggers()
 
 
 def start_job(cfg):
@@ -898,6 +1074,7 @@ def start_job(cfg):
         cfg["char_t"] = float(cfg.get("char_t", 0.85))
         cfg["n_ctx"] = int(cfg.get("n_ctx", 8192))
         cfg["nl_res"] = int(cfg.get("nl_res", 1536))
+        cfg["maxt"] = min(4096, max(32, int(cfg.get("maxt", 512))))
     except (TypeError, ValueError):
         return False, "阈值或参数必须是数字"
     _last_cfg = dict(cfg)
@@ -954,8 +1131,17 @@ def _run_compare(models, params):
                 else:
                     res["output"] = _nl_interrogate(
                         m["id"], im, params["nl_prompt"],
-                        max_side=params["res"], n_ctx=params["n_ctx"])
+                        max_side=params["res"], n_ctx=params["n_ctx"],
+                        max_tokens=params["maxt"],
+                        should_cancel=lambda: _cmp["cancel"])
                 res["ok"] = True
+            except _CompareStopped:
+                # 用户停止：当前模型作废，整体结束
+                res["error"] = "已停止"
+                res["sec"] = round(time.time() - t0, 1)
+                with _cmp_lock:
+                    _cmp["results"].append(res)
+                break
             except Exception as e:
                 traceback.print_exc()
                 res["error"] = f"{e.__class__.__name__}: {e}"
@@ -963,6 +1149,11 @@ def _run_compare(models, params):
             with _cmp_lock:
                 _cmp["results"].append(res)
                 _cmp["done"] += 1
+            # 每推理完一个模型立刻卸载它的显存，再跑下一个
+            if m["kind"] == "tag":
+                _drop_tagger(m["id"])
+            else:
+                _unload_llama_now()
     except Exception as e:
         traceback.print_exc()
         with _cmp_lock:
@@ -977,14 +1168,9 @@ def _run_compare(models, params):
             _cmp["running"] = False
             _cmp["finished"] = True
             _cmp["current"] = ""
-        # llama.cpp 模型很占显存，对比完自动释放
-        with _llama_lock:
-            if _llama_model is not None:
-                _llama_model = None
-                _llama_key = None
-                import gc
-                gc.collect()
-                print("[nl] model unloaded to free VRAM")
+        # 模型很占显存，对比完立刻全部释放（NL + 标签模型）
+        _unload_llama_now()
+        _unload_taggers()
 
 
 def start_compare(models, params):
@@ -1010,6 +1196,7 @@ def start_compare(models, params):
                   "char_t": float(params.get("char_t", 0.85)),
                   "n_ctx": int(params.get("n_ctx", 8192)),
                   "res": int(params.get("res", 1536)),
+                  "maxt": min(4096, max(32, int(params.get("maxt", 512)))),
                   "nl_prompt": (params.get("nl_prompt") or "").strip()
                                or DEFAULT_NL_PROMPT}
     except (TypeError, ValueError):
@@ -1284,13 +1471,8 @@ PAGE = r"""<!doctype html>
       </div>
       <textarea id="nl_prompt" spellcheck="false"></textarea>
       <div class="row" style="margin-top:10px">
-        <label class="lab">上下文长度</label>
-        <select id="n_ctx">
-          <option value="2048">2048</option>
-          <option value="4096">4096</option>
-          <option value="8192" selected>8192</option>
-          <option value="16384">16384</option>
-        </select>
+        <label class="lab">输出长度</label>
+        <input type="number" id="maxt" value="512" min="32" max="4096" step="32" style="width:90px">
         <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
         <select id="nl_res">
           <option value="0">原始分辨率</option>
@@ -1300,7 +1482,7 @@ PAGE = r"""<!doctype html>
           <option value="2048">2048（超清·慢）</option>
         </select>
       </div>
-      <div class="tip" style="margin:-4px 0 8px 120px">上下文长度与图片分辨率（长边上限）仅对自然语言打标生效</div>
+      <div class="tip" style="margin:-4px 0 8px 120px">输出长度（最多生成的 token 数）与图片分辨率（长边上限）仅对自然语言打标生效</div>
     </div>
 
     <div class="row" style="margin-top:12px">
@@ -1357,13 +1539,8 @@ PAGE = r"""<!doctype html>
       <input type="number" id="cmp_char_t" value="0.85" min="0" max="1" step="0.05">
     </div>
     <div class="row">
-      <label class="lab">上下文长度</label>
-      <select id="cmp_n_ctx">
-        <option value="2048">2048</option>
-        <option value="4096">4096</option>
-        <option value="8192" selected>8192</option>
-        <option value="16384">16384</option>
-      </select>
+      <label class="lab">输出长度</label>
+      <input type="number" id="cmp_maxt" value="512" min="32" max="4096" step="32" style="width:90px">
       <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
       <select id="cmp_res">
         <option value="0">原始分辨率</option>
@@ -1373,7 +1550,7 @@ PAGE = r"""<!doctype html>
         <option value="2048">2048（超清·慢）</option>
       </select>
     </div>
-    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；上下文长度与图片分辨率仅对自然语言模型生效</div>
+    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；输出长度（最多生成的 token 数）与图片分辨率仅对自然语言模型生效</div>
 
     <div class="row">
       <label class="lab">NL 提示词</label>
@@ -1811,8 +1988,8 @@ function args() {
         gen_t: parseFloat($('gen_t').value),
         char_t: parseFloat($('char_t').value),
         nl_prompt: $('nl_prompt').value,
-        n_ctx: parseInt($('n_ctx').value),
         nl_res: parseInt($('nl_res').value),
+        maxt: parseInt($('maxt').value) || 512,
         prefix: $('prefix').value,
         suffix: $('suffix').value,
         skip_existing: $('skip_existing').checked
@@ -1948,7 +2125,7 @@ async function runCompare() {
         chips.map(c => ({ id: c.value, kind: c.dataset.kind }))));
     fd.append('gen_t', $('cmp_gen_t').value);
     fd.append('char_t', $('cmp_char_t').value);
-    fd.append('n_ctx', $('cmp_n_ctx').value);
+    fd.append('maxt', $('cmp_maxt').value);
     fd.append('res', $('cmp_res').value);
     fd.append('nl_prompt', $('cmp_nl_prompt').value);
     $('cmpRunBtn').disabled = true;

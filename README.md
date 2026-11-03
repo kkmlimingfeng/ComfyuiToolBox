@@ -30,7 +30,7 @@ flowchart TB
     subgraph local["本地工具（独立 Flask 服务）"]
         direction LR
         editor["🏷️ 图片标签编辑器<br/>7866"]
-        img2prompt["🖼️ Krea2 提示词反推<br/>7867"]
+        img2prompt["🖼️ 自然语言提示词反推<br/>7867"]
         tagger["📊 数据集打标<br/>7869"]
         lora["🔍 LoRA 参数分析<br/>7864"]
         renamer["📂 批量文件后缀更改<br/>7865"]
@@ -41,6 +41,7 @@ flowchart TB
         direction LR
         danbooru["🛒 Danbooru 标签超市<br/>在线服务"]
         spell["✨ Stable Diffusion 法术解析<br/>在线服务"]
+        comfyviewer["🧩 ComfyUI 工作流查看器<br/>在线服务"]
     end
 
     classDef localbox fill:#dbeafe,stroke:#2563eb,color:#1e3a5f
@@ -64,21 +65,22 @@ flowchart TB
 | 工具 | 用途 | 状态 |
 | --- | --- | :---: |
 | 🏷️ 图片标签编辑器 | 浏览图片、编辑 `.txt` 标签、批量增删/排序、离线翻译 | ✅ |
-| 🖼️ Krea2 提示词反推 | 使用本地视觉语言模型从图片生成文生图 Prompt | ✅ |
+| 🖼️ 自然语言提示词反推 | 使用本地视觉语言模型从图片生成文生图 Prompt | ✅ |
 | 📊 数据集打标 | 批量给图片打标（Danbooru 标签 / 自然语言描述），多模型效果对比，结果离线翻译 | ✅ |
 | 🔍 LoRA 参数分析 | 查看网络算法、Rank / Alpha、训练引擎（kohya / Anima / ai-toolkit / fizgig）与底模家族、训练信息及作用层级 | ✅ |
 | 📂 批量文件后缀更改 | 批量追加 / 删除文件名字符串，支持预览和防覆盖 | ✅ |
 | 🛒 标签超市（本地） | 本地标签库：Danbooru 15 万+ 与 Anima 官方词表 13.7 万+ 双数据源，分类浏览、多词搜索、离线翻译、购物车组合 Prompt、多数据源 CSV 切换 | ✅ |
 | 🛒 Danbooru 标签超市 | 查询、组合和导出 Danbooru 标签（第三方网络服务） | ✅ |
 | ✨ Stable Diffusion 法术解析 | NovelAI 官方 Danbooru 标签联想与拼写辅助（第三方网络服务） | ✅ |
+| 🧩 ComfyUI 工作流查看器 | 在线查看 ComfyUI 工作流 JSON 节点图（第三方网络服务） | ✅ |
 
 > **后续新增工具** 会继续沿用相同的门户接入方式，因此 README 的工具表也可以按同样格式继续向下扩展。
 
 ### 图片标签编辑器 
 ![图片标签编辑器](images/editor.png)
 
-### Krea2 提示词反推
-![Krea2 提示词反推](images/img2prompt.png)
+### 自然语言提示词反推
+![自然语言提示词反推](images/img2prompt.png)
 
 ### 数据集打标 (新增🌟)
 
@@ -105,6 +107,9 @@ flowchart TB
 
 ### Stable Diffusion法术解析
 ![Stable Diffusion法术解析](images/spell_novelai.png)
+
+### ComfyUI工作流查看器
+![ComfyUI工作流查看器](images/comfy_workflow_viewer.png)
 
 ---
 
@@ -202,7 +207,7 @@ run.bat
 
 <!-- 截图预留：docs/images/editor-detail.png -->
 
-### 🖼️ Krea2 提示词反推
+### 🖼️ 自然语言提示词反推
 
 使用本地 Qwen3-VL 视觉语言模型，根据输入图片生成适用于文生图模型的 Prompt。
 
@@ -212,7 +217,7 @@ run.bat
 - 中文 / 英文 Prompt 生成
 - 视觉模型自动扫描 `model/` 目录，放入即用（Qwen3-VL-4B / Qwen3.8-27B 等）
 - 手动加载 / 卸载模型，按需占用和释放显存
-- 自定义、保存和恢复系统提示词
+- 系统提示词多方案管理：可切换 / 新增 / 删除方案，离线保存在 `prompts.json`
 - 图片分辨率设置与结果复制、下载
 
 适合用于：
@@ -327,6 +332,19 @@ NovelAI 官方的 Danbooru 标签联想与拼写辅助工具（<https://spell.no
 
 <!-- 截图预留：docs/images/spell-detail.png -->
 
+### 🧩 ComfyUI 工作流查看器
+
+在线查看 ComfyUI 工作流 JSON 的节点图工具（<https://comfy.icu/comfyui-workflow-viewer>）。
+
+适合用于：
+
+- 把工作流 JSON 拖入网页，可视化查看节点连接与参数
+- 阅读别人分享的工作流，无需启动 ComfyUI
+
+该工具内嵌第三方网页，无需本地部署，可用性受网络环境影响。
+
+<!-- 截图预留：docs/images/comfy-workflow-detail.png -->
+
 ---
 
 ## 🧠 Models
@@ -352,7 +370,7 @@ model/
 
 ### 视觉模型（GGUF）
 
-用于 Krea2 提示词反推（llama.cpp 推理，页面可切换模型）。
+用于 自然语言提示词反推（llama.cpp 推理，页面可切换模型）。
 
 模型放在 `model/` 下后自动扫描识别，命名约定（`mmproj` 字段紧跟模型名）：
 
@@ -546,7 +564,7 @@ if __name__ == "__main__":
 | LoRA 参数分析 | `7864` |
 | 批量文件后缀更改 | `7865` |
 | 图片标签编辑器 | `7866` |
-| Krea2 提示词反推 | `7867` |
+| 自然语言提示词反推 | `7867` |
 | 标签超市（本地） | `7868` |
 | 数据集打标 | `7869` |
 | 新工具建议 | `7870+` |
@@ -592,7 +610,7 @@ logs/
 
 同时可以直接进入对应工具目录运行 `run.bat`，这样更容易看到完整错误输出。
 
-### Krea2 无法加载模型
+### 自然语言提示词反推无法加载模型
 
 确认模型目录和文件完整，并检查 NVIDIA 驱动、PyTorch 与 CUDA 是否正常。
 

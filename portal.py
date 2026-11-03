@@ -120,6 +120,14 @@ EXTERNAL_TOOLS = [
         "desc": "Danbooru 标签联想与拼写辅助（NovelAI 官方）",
         "url": "https://spell.novelai.dev/",
     },
+    {
+        "id": "comfy_workflow_viewer",
+        "group": "外部工具",
+        "name": "ComfyUI 工作流查看器",
+        "icon": "🧩",
+        "desc": "在线查看 ComfyUI 工作流 JSON 节点图（comfy.icu）",
+        "url": "https://comfy.icu/comfyui-workflow-viewer",
+    },
 ]
 
 
