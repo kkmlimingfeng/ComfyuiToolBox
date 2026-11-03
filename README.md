@@ -31,6 +31,7 @@ flowchart TB
         direction LR
         editor["🏷️ 图片标签编辑器<br/>7866"]
         img2prompt["🖼️ Krea2 提示词反推<br/>7867"]
+        tagger["📊 数据集打标<br/>7869"]
         lora["🔍 LoRA 参数分析<br/>7864"]
         renamer["📂 批量文件后缀更改<br/>7865"]
         shop["🛒 标签超市（本地）<br/>7868"]
@@ -64,6 +65,7 @@ flowchart TB
 | --- | --- | :---: |
 | 🏷️ 图片标签编辑器 | 浏览图片、编辑 `.txt` 标签、批量增删/排序、离线翻译 | ✅ |
 | 🖼️ Krea2 提示词反推 | 使用本地视觉语言模型从图片生成文生图 Prompt | ✅ |
+| 📊 数据集打标 | 批量给图片打标（Danbooru 标签 / 自然语言描述），多模型效果对比，结果离线翻译 | ✅ |
 | 🔍 LoRA 参数分析 | 查看网络算法、Rank / Alpha、训练引擎（kohya / Anima / ai-toolkit / fizgig）与底模家族、训练信息及作用层级 | ✅ |
 | 📂 批量文件后缀更改 | 批量追加 / 删除文件名字符串，支持预览和防覆盖 | ✅ |
 | 🛒 标签超市（本地） | 本地标签库：Danbooru 15 万+ 与 Anima 官方词表 13.7 万+ 双数据源，分类浏览、多词搜索、离线翻译、购物车组合 Prompt、多数据源 CSV 切换 | ✅ |
@@ -77,6 +79,17 @@ flowchart TB
 
 ### Krea2 提示词反推
 ![Krea2 提示词反推](images/img2prompt.png)
+
+### 数据集打标 (新增🌟)
+
+#### 批量打标
+![批量打标](images/dataset-tagger1.png)
+
+#### 效果对比
+![效果对比](images/dataset-tagger2.png)
+
+#### 模型配置
+![模型配置](images/dataset-tagger3.png)
 
 ### 标签超市 (更新🌟)
 ![标签超市](images/label_shop.png)
@@ -212,6 +225,33 @@ run.bat
 需要 NVIDIA GPU 及对应模型文件；模型放在 `model/` 目录后，在页面中选择并加载。
 
 <!-- 截图预留：docs/images/img2prompt-detail.png -->
+
+### 📊 数据集打标
+
+面向训练数据集的批量打标工具，结果写入图片同名 `.txt`（UTF-8）。
+
+**批量打标**：
+
+- 标签打标：WD14 系列（EVA02-Large v3 / ViT-Large v3 / ConvNeXt v3 / SwinV2 v3 / ViT v3 / MOAT v2 / ConvNeXtV2 v2）与 CL Tagger 系列（SigLIP2，onnxruntime GPU 加速，自动回退 CPU），标签阈值 / 角色阈值可按模型分别设置
+- 自然语言打标：复用 `model/` 目录下的 GGUF 视觉模型（Qwen3-VL 等），也支持一键下载 JoyCaption Beta One；提示词可自由编辑
+- 附加提示词：前缀 / 后缀追加，已有同名 txt 可跳过
+- 打标前可先「检查」校验文件夹内图片能否正常解码
+
+**效果对比**：
+
+- 单张图片（支持拖拽上传）同时勾选最多 8 个模型对比打标效果，标签模型与自然语言模型可混选
+- 标签结果显示每个标签的置信度（3 位小数）
+- 对比结果可使用本地 Hy-MT2 模型离线翻译，译文颜色 / 字号可自定义并永久保存
+- 支持设置图片分辨率（含原始分辨率）与上下文长度
+
+**模型配置**：
+
+- 标签模型与自然语言模型分组管理，显示大小 / 状态 / 备注
+- 在线下载（镜像 / 官方源自动兜底），已下载模型可删除
+- 每个标签模型的标签阈值 / 角色阈值可直接编辑并持久化
+- CL Tagger v2 系列为 gated 仓库，需在页面填入 HF Token（仅本次运行有效，不落盘）
+
+<!-- 截图预留：docs/images/tagger-detail.png -->
 
 ### 🔍 LoRA 参数分析
 
@@ -391,6 +431,11 @@ ComfyUI-Toolbox/
     │   ├── manifest.json
     │   └── run.bat
     │
+    ├── dataset_tagger/
+    │   ├── app.py
+    │   ├── manifest.json
+    │   └── run.bat
+    │
     ├── lora_inspect/
     │   ├── app.py
     │   ├── inspect_core.py
@@ -503,6 +548,7 @@ if __name__ == "__main__":
 | 图片标签编辑器 | `7866` |
 | Krea2 提示词反推 | `7867` |
 | 标签超市（本地） | `7868` |
+| 数据集打标 | `7869` |
 | 新工具建议 | `7870+` |
 
 新增工具时请确保端口没有与已有服务冲突。

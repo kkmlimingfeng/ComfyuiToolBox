@@ -110,6 +110,49 @@ CL_DEFAULT_PROCESSOR = "google/siglip2-so400m-patch16-naflex"
 
 MIRRORS = {"mirror": "https://hf-mirror.com", "official": "https://huggingface.co"}
 
+# 内置自然语言打标模型：JoyCaption Beta One（Llama 3.1 8B 视觉，擅长详细图像描述）。
+# 主模型与 mmproj 分属两个仓库；mmproj 下载后重命名，保证与主模型文件名前缀配对
+# （scan_nl_models 按"主模型文件名前缀 + mmproj"自动配对）。
+JOYCAPTION_MMPROJ_LOCAL = "llama-joycaption-beta-one-hf-llava.Q4_K_M.mmproj-f16.gguf"
+BUILTIN_NL_MODELS = [
+    {"id": "joycaption-beta-one", "kind": "nl",
+     "repo": "mradermacher/llama-joycaption-beta-one-hf-llava-GGUF",
+     "file": "llama-joycaption-beta-one-hf-llava.Q4_K_M.gguf",
+     "mmproj_repo": "concedo/llama-joycaption-beta-one-hf-llava-mmproj-gguf",
+     "mmproj_file": "llama-joycaption-beta-one-llava-mmproj-model-f16.gguf",
+     "label": "JoyCaption Beta One", "remark": "自然语言，详细图像描述，8B",
+     "size_gb": 5.4},
+]
+# JoyCaption 官方推荐提示词（勾选该模型时自动填入，仍可手动修改）
+JOYCAPTION_PROMPT = "Write a long detailed caption for this image."
+
+# JoyCaption GGUF 内嵌的 chat template 不支持多模态 content 列表（content + 字符串
+# 直接拼接会抛 TypeError），这里改用等价的 Llama3 模板：content 为列表时把
+# image_url 项渲染成 <image> 占位（llama_cpp 的 mtmd 会把它替换为媒体标记），
+# 文本项原样拼接。eos_token 由 llama_cpp 渲染时注入，保证与停止符一致。
+JOYCAPTION_CHAT_TEMPLATE = (
+    "{{- bos_token -}}"
+    "{%- for message in messages -%}"
+    "{%- set ns = namespace(content='') -%}"
+    "{%- if message['content'] is string -%}"
+    "{%- set ns.content = message['content'] -%}"
+    "{%- else -%}"
+    "{%- for item in message['content'] -%}"
+    "{%- if item['type'] == 'text' -%}"
+    "{%- set ns.content = ns.content ~ item['text'] -%}"
+    "{%- elif item['type'] == 'image_url' -%}"
+    "{%- set ns.content = ns.content ~ '<image>' -%}"
+    "{%- endif -%}"
+    "{%- endfor -%}"
+    "{%- endif -%}"
+    "{{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'"
+    " + ns.content + eos_token -}}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}"
+    "{{- '<|start_header_id|>assistant<|end_header_id|>\\n\\n' -}}"
+    "{%- endif -%}"
+)
+
 
 def load_config():
     try:
@@ -171,6 +214,19 @@ def model_installed(m):
                 and os.path.getsize(p) < MIN_ONNX_BYTES):
             return False
     return True
+
+
+def builtin_nl_entry(model_id):
+    """按 id（内置 id 或扫描出的 gguf: 主文件名）查内置自然语言模型条目。"""
+    for b in BUILTIN_NL_MODELS:
+        if model_id in (b["id"], "gguf:" + os.path.splitext(b["file"])[0]):
+            return b
+    return None
+
+
+def builtin_nl_installed(m):
+    return (os.path.isfile(os.path.join(MODEL_DIR, m["file"]))
+            and os.path.isfile(os.path.join(MODEL_DIR, JOYCAPTION_MMPROJ_LOCAL)))
 
 
 def scan_nl_models():
@@ -286,6 +342,55 @@ def _download_model(model_id, cfg):
                         os.remove(dest + ".part")
                     except OSError:
                         pass
+                except Exception as e:
+                    last_err = e
+                    try:
+                        os.remove(dest + ".part")
+                    except OSError:
+                        pass
+            if last_err:
+                raise last_err
+            with _dl_lock:
+                _dl_state["done_files"] += 1
+        with _dl_lock:
+            _dl_state.update(active=False, finished=True, file="", pct=100)
+        return None
+    except Exception as e:
+        traceback.print_exc()
+        with _dl_lock:
+            _dl_state.update(active=False, finished=True,
+                             error=f"{e.__class__.__name__}: {e}")
+        return str(e)
+
+
+def _download_nl(m, cfg):
+    """下载一个内置自然语言模型（主模型 + mmproj，两个仓库），存到 model/ 根目录。"""
+    hosts = [MIRRORS.get(cfg.get("mirror", "mirror"), MIRRORS["mirror"])] + \
+            [h for k, h in MIRRORS.items() if k != cfg.get("mirror", "mirror")]
+    jobs = [(m["repo"], m["file"], m["file"]),
+            (m["mmproj_repo"], m["mmproj_file"], JOYCAPTION_MMPROJ_LOCAL)]
+    with _dl_lock:
+        _dl_state.update(active=True, id=m["id"], file="", pct=0, done_files=0,
+                         total_files=len(jobs), error=None, finished=False)
+    try:
+        for repo, fname, local in jobs:
+            dest = os.path.join(MODEL_DIR, local)
+            if os.path.isfile(dest):
+                with _dl_lock:
+                    _dl_state["done_files"] += 1
+                continue
+            with _dl_lock:
+                _dl_state["file"] = fname
+                _dl_state["pct"] = 0
+            last_err = None
+            for host in hosts:
+                url = f"{host}/{repo}/resolve/main/{fname}"
+                try:
+                    _url_download(url, dest + ".part",
+                                  lambda p: _set_pct(p), token=_hf_token)
+                    os.replace(dest + ".part", dest)
+                    last_err = None
+                    break
                 except Exception as e:
                     last_err = e
                     try:
@@ -626,6 +731,13 @@ def _load_llama(key, n_ctx=8192):
             verbose=False,
         )
         _llama_key = (key, n_ctx)
+        # JoyCaption 内嵌模板不兼容多模态 content 列表，替换为等价的 Llama3 模板：
+        # 改模板字符串 + 重新编译 jinja（构造时已预编译），并让解析缓存失效
+        if "joycaption" in m["model"].lower():
+            h = _llama_model.chat_handler
+            h.chat_format = JOYCAPTION_CHAT_TEMPLATE
+            h._change_chat_template(JOYCAPTION_CHAT_TEMPLATE)
+            h._template_initialized = False
         print("[nl] ready")
 
 
@@ -1400,13 +1512,23 @@ $('mode').onchange = () => {
     renderModels();
 };
 
-// 切换模型时自动填入该模型的推荐阈值（WD14: 0.35/0.85，CL: 见各模型定义）
+// 切换模型时自动填入该模型的推荐阈值（WD14: 0.35/0.85，CL: 见各模型定义）；
+// 切换到带推荐提示词的 NL 模型（如 JoyCaption）且用户没自定义过提示词时一并填入
+let _lastAutoPrompt = '';
+function maybeAutoPrompt(m, box) {
+    if (m && m.kind === 'nl' && m.def_prompt && m.def_prompt !== _lastAutoPrompt
+            && (!box.value || box.value === _lastAutoPrompt)) {
+        box.value = m.def_prompt;
+        _lastAutoPrompt = m.def_prompt;
+    }
+}
 function applyDefThr() {
     const m = models.find(x => x.id === $('model').value);
     if (m && m.kind === 'tag' && m.def_gen != null) {
         $('gen_t').value = m.def_gen;
         $('char_t').value = m.def_char;
     }
+    maybeAutoPrompt(m, $('nl_prompt'));
 }
 $('model').onchange = applyDefThr;
 
@@ -1541,13 +1663,13 @@ function renderCfgTable() {
         const tdo = document.createElement('td');
         tdo.style.textAlign = 'center';
         tdo.style.whiteSpace = 'nowrap';
-        if (m.kind === 'tag' && !m.installed) {
+        if (!m.installed) {
             const bd = document.createElement('button');
             bd.className = 'mini'; bd.textContent = '下载';
             bd.onclick = () => downloadCfg(m.id, bd);
             tdo.appendChild(bd);
         }
-        if (m.kind === 'tag' && m.installed) {
+        if (m.installed && (m.kind === 'tag' || m.builtin_nl)) {
             const bx = document.createElement('button');
             bx.className = 'mini danger'; bx.textContent = '删除';
             bx.onclick = () => delModelArm(m.id, bx);
@@ -1779,6 +1901,8 @@ function renderCmpModels() {
                 $('cmp_gen_t').value = m.def_gen;
                 $('cmp_char_t').value = m.def_char;
             }
+            // 勾选 JoyCaption 等带推荐提示词的 NL 模型时自动填入
+            if (cb.checked) maybeAutoPrompt(m, $('cmp_nl_prompt'));
         };
         const badge = document.createElement('span');
         badge.className = 'badge ' + m.kind;
@@ -1980,6 +2104,7 @@ async function pollCmp() {
         const j = await r.json();
         $('nl_prompt').value = j.prompt;
         $('cmp_nl_prompt').value = j.prompt;
+        _lastAutoPrompt = j.prompt;
     } catch (e) {}
     await loadModels();
     pollJob();
@@ -2017,11 +2142,26 @@ def _all_models(cfg):
                        "visible": m["id"] not in cfg.get("hidden", []),
                        "installed": model_installed(m)})
     for key, m in scan_nl_models().items():
+        is_joy = "joycaption" in m["label"].lower()
         models.append({"id": key, "label": m["label"], "kind": "nl",
-                       "remark": "本地视觉模型，可调提示词", "size_gb": m.get("size_gb", 0),
+                       "remark": ("自然语言，详细图像描述（JoyCaption）" if is_joy
+                                  else "本地视觉模型，可调提示词"),
+                       "size_gb": m.get("size_gb", 0),
                        "custom": False,
+                       "def_prompt": JOYCAPTION_PROMPT if is_joy else DEFAULT_NL_PROMPT,
+                       "builtin_nl": is_joy,
                        "visible": key not in cfg.get("hidden", []),
                        "installed": True})
+    for m in BUILTIN_NL_MODELS:
+        if builtin_nl_installed(m):
+            continue   # 已安装的由上面扫描条目呈现
+        models.append({"id": m["id"], "label": m["label"], "kind": "nl",
+                       "remark": m.get("remark", ""), "size_gb": m.get("size_gb", 0),
+                       "custom": False,
+                       "def_prompt": JOYCAPTION_PROMPT,
+                       "builtin_nl": True,
+                       "visible": m["id"] not in cfg.get("hidden", []),
+                       "installed": False})
     return models
 
 
@@ -2112,6 +2252,15 @@ def api_download():
     cfg = load_config()
     data = request.get_json(silent=True) or {}
     model_id = data.get("id", "")
+    bnl = builtin_nl_entry(model_id)
+    if bnl and bnl["kind"] == "nl":
+        if builtin_nl_installed(bnl):
+            return jsonify({"ok": False, "error": "模型已存在"}), 400
+        with _dl_lock:
+            if _dl_state["active"]:
+                return jsonify({"ok": False, "error": "已有下载在进行中"}), 409
+        threading.Thread(target=_download_nl, args=(bnl, cfg), daemon=True).start()
+        return jsonify({"ok": True})
     m = model_entry(cfg, model_id)
     if not m:
         return jsonify({"ok": False, "error": "该模型不支持在线下载"}), 400
@@ -2140,9 +2289,28 @@ def api_download_ack():
 
 @app.post("/api/delete_model")
 def api_delete_model():
-    """删除一个已下载的标签模型目录。"""
+    """删除一个已下载的模型（标签模型目录 / 内置自然语言模型文件）。"""
     cfg = load_config()
     model_id = (request.get_json(silent=True) or {}).get("id", "")
+    bnl = builtin_nl_entry(model_id)
+    if bnl:
+        if not builtin_nl_installed(bnl):
+            return jsonify({"ok": False, "error": "模型未下载"}), 400
+        with _job_lock:
+            if _job["running"]:
+                return jsonify({"ok": False, "error": "打标任务进行中，无法删除"}), 409
+        with _cmp_lock:
+            if _cmp["running"]:
+                return jsonify({"ok": False, "error": "效果对比进行中，无法删除"}), 409
+        try:
+            for f in (bnl["file"], JOYCAPTION_MMPROJ_LOCAL):
+                p = os.path.join(MODEL_DIR, f)
+                if os.path.isfile(p):
+                    os.remove(p)
+                    print(f"[tagger] 已删除模型文件：{p}")
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"{e.__class__.__name__}: {e}"}), 500
+        return jsonify({"ok": True})
     m = model_entry(cfg, model_id)
     if not m or m.get("kind") == "nl":
         return jsonify({"ok": False, "error": "该模型不支持删除"}), 400
