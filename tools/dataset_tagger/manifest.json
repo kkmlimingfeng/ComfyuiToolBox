@@ -1,0 +1,9 @@
+{
+  "id": "dataset_tagger",
+  "group": "本地工具箱",
+  "name": "数据集打标",
+  "icon": "🏷️",
+  "port": 7869,
+  "script": "app.py",
+  "desc": "批量给数据集图片打标：WD14 标签打标或视觉模型自然语言打标，写入同名 txt"
+}
