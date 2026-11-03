@@ -36,7 +36,7 @@ if errorlevel 1 goto :fail
 
 echo.
 echo 验证安装...
-python\python.exe -c "import torch, transformers, flask, llama_cpp, safetensors, numpy, PIL; print('torch', torch.__version__, '| cuda:', torch.cuda.is_available()); print('全部依赖就绪！')"
+python\python.exe -c "import torch, transformers, flask, llama_cpp, safetensors, numpy, PIL, imageio_ffmpeg; print('torch', torch.__version__, '| cuda:', torch.cuda.is_available()); print('全部依赖就绪！')"
 if errorlevel 1 goto :fail
 
 echo.

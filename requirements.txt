@@ -6,5 +6,6 @@ accelerate
 safetensors
 numpy
 pillow
+imageio-ffmpeg
 sentencepiece
 huggingface_hub
