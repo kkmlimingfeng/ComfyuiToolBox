@@ -39,7 +39,8 @@ _MT_LANGS = [
 
 # ---- 翻译配置（保存在脚本同目录 translate_config.json）----
 _CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_config.json")
-_translate_cfg = {"target_lang": "Simplified Chinese", "model_src": "auto"}
+_translate_cfg = {"target_lang": "Simplified Chinese", "model_src": "auto",
+                  "zh_color": "#6c5ce7", "zh_size": 13}
 
 def _load_translate_cfg():
     global _translate_cfg
@@ -57,6 +58,13 @@ def _load_translate_cfg():
         _translate_cfg["model_src"] = "auto"
     if _translate_cfg.get("target_lang") not in [v for _, v in _MT_LANGS]:
         _translate_cfg["target_lang"] = "Simplified Chinese"
+    c = _translate_cfg.get("zh_color")
+    if not (isinstance(c, str) and len(c) == 7 and c.startswith("#")):
+        _translate_cfg["zh_color"] = "#6c5ce7"
+    try:
+        _translate_cfg["zh_size"] = min(40, max(9, int(_translate_cfg.get("zh_size"))))
+    except (TypeError, ValueError):
+        _translate_cfg["zh_size"] = 13
 
 def _save_translate_cfg():
     try:
@@ -570,7 +578,7 @@ EDIT_HTML = """
         .btn-add-all { background:#00b894; color:white; }
         .btn-translate { background:#6c5ce7; color:white; cursor:pointer; }
         .btn-translate.active { background:#a29bfe; }
-        .tag-zh { color:#6c5ce7; font-size:0.85em; margin-left:6px; }
+        .tag-zh { color:var(--tag-zh-color, #6c5ce7); font-size:var(--tag-zh-size, 13px); margin-left:6px; }
         
         .add-tag-line { display:flex; gap:8px; align-items:center; }
         .add-tag-line input {
@@ -666,6 +674,17 @@ EDIT_HTML = """
             box-sizing: border-box;
         }
         .tcfg-row select option { color: #222; }
+        .tcfg-row input[type="color"], .tcfg-row input[type="number"] {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 8px;
+            border: 1px solid rgba(128,128,128,0.4);
+            background: transparent;
+            color: inherit;
+            box-sizing: border-box;
+        }
+        .tcfg-inline { display: flex; gap: 14px; }
+        .tcfg-inline .tcfg-row { flex: 1; }
 
         /* 批量替换弹窗 */
         .replace-modal-box {
@@ -826,6 +845,16 @@ EDIT_HTML = """
                     <option value="hf">HuggingFace 官网</option>
                     <option value="mirror">hf-mirror 镜像</option>
                 </select>
+            </div>
+            <div class="tcfg-inline">
+                <div class="tcfg-row">
+                    <label>译文颜色</label>
+                    <input type="color" id="tcfgColor">
+                </div>
+                <div class="tcfg-row">
+                    <label>译文字号（px，9-40）</label>
+                    <input type="number" id="tcfgSize" min="9" max="40" step="1">
+                </div>
             </div>
             <div style="margin-top: 24px;">
                 <button class="modal-btn" type="button" onclick="saveTranslateCfg()">保存</button>
@@ -1052,6 +1081,16 @@ EDIT_HTML = """
         // 这是最稳定的路径，避免内嵌 WebView / iframe 对 AJAX DOM 更新产生兼容问题。
 
         // ===== 翻译设置 =====
+        // 译文颜色/字号：写到 CSS 变量，立即生效
+        function applyZhStyle(cfg) {
+            if (cfg.zh_color) {
+                document.documentElement.style.setProperty('--tag-zh-color', cfg.zh_color);
+            }
+            const size = parseInt(cfg.zh_size);
+            if (!isNaN(size)) {
+                document.documentElement.style.setProperty('--tag-zh-size', size + 'px');
+            }
+        }
         async function openTranslateCfg() {
             try {
                 const resp = await fetch('/api/translate_config');
@@ -1059,6 +1098,8 @@ EDIT_HTML = """
                 if (data && data.config) {
                     document.getElementById('tcfgLang').value = data.config.target_lang;
                     document.getElementById('tcfgSrc').value = data.config.model_src;
+                    document.getElementById('tcfgColor').value = data.config.zh_color;
+                    document.getElementById('tcfgSize').value = data.config.zh_size;
                 }
                 if (data) {
                     const dev = document.getElementById('tcfgDevice');
@@ -1073,17 +1114,22 @@ EDIT_HTML = """
         async function saveTranslateCfg() {
             const langSel = document.getElementById('tcfgLang');
             const src = document.getElementById('tcfgSrc').value;
+            const zhColor = document.getElementById('tcfgColor').value;
+            const zhSize = parseInt(document.getElementById('tcfgSize').value);
             try {
                 const resp = await fetch('/api/translate_config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ target_lang: langSel.value, model_src: src })
+                    body: JSON.stringify({ target_lang: langSel.value, model_src: src,
+                                           zh_color: zhColor,
+                                           zh_size: isNaN(zhSize) ? 13 : zhSize })
                 });
                 const data = await resp.json();
                 if (data && data.ok && data.config) {
                     _targetLangLabel = langSel.selectedOptions[0].text;
                     const btn = document.getElementById('translateBtn');
                     if (btn && !_zhOn) btn.innerText = translateBtnText(false);
+                    applyZhStyle(data.config);
                     closeTranslateCfg();
                     // 翻译开启中：清空旧语言译文，按新语言重新拉取
                     if (_zhOn) {
@@ -1106,6 +1152,7 @@ EDIT_HTML = """
                     _targetLangLabel = opt ? opt.text : '';
                     const btn = document.getElementById('translateBtn');
                     if (btn) btn.innerText = translateBtnText(false);
+                    applyZhStyle(data.config);
                 }
             }).catch(() => {});
         })();
@@ -1551,6 +1598,14 @@ def api_set_tcfg():
         _translate_cfg["target_lang"] = lang
     if src in ("auto", "hf", "mirror"):
         _translate_cfg["model_src"] = src
+    c = payload.get("zh_color")
+    if (isinstance(c, str) and len(c) == 7 and c.startswith("#")
+            and all(ch in "0123456789abcdefABCDEF" for ch in c[1:])):
+        _translate_cfg["zh_color"] = c
+    try:
+        _translate_cfg["zh_size"] = min(40, max(9, int(payload.get("zh_size"))))
+    except (TypeError, ValueError):
+        pass
     _save_translate_cfg()
     return {"ok": True, "config": _translate_cfg}
 

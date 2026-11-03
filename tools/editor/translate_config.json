@@ -1,4 +1,6 @@
 {
   "target_lang": "Simplified Chinese",
-  "model_src": "mirror"
+  "model_src": "mirror",
+  "zh_color": "#15b300",
+  "zh_size": 14
 }

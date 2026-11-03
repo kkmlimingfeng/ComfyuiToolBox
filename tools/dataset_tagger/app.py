@@ -46,25 +46,30 @@ MIN_ONNX_BYTES = 50 * 1024 * 1024   # 小于此值视为下载不完整
 # ---------------------------------------------------------------- 模型注册 ---
 
 # 内置标签打标模型：WD14 系列（SmilingWolf），均为 ONNX + selected_tags.csv
+# remark 是配置窗口"备注"列的说明文字；size_gb 为预计下载大小（GB，约数）
 WD14_MODELS = [
     {"id": "wd-eva02-large-tagger-v3",
      "repo": "SmilingWolf/wd-eva02-large-tagger-v3",
-     "label": "WD EVA02-Large v3（动漫，推荐）", "size": "约 1.2GB"},
+     "label": "WD EVA02-Large v3", "remark": "动漫，推荐", "size_gb": 1.2},
+    {"id": "wd-vit-large-tagger-v3",
+     "repo": "SmilingWolf/wd-vit-large-tagger-v3",
+     "label": "WD ViT-Large v3", "remark": "动漫，大模型精度更高", "size_gb": 1.2},
+    {"id": "wd-convnext-tagger-v3",
+     "repo": "SmilingWolf/wd-convnext-tagger-v3",
+     "label": "WD ConvNeXt v3", "remark": "动漫，轻量", "size_gb": 0.33},
+    {"id": "wd-swinv2-tagger-v3",
+     "repo": "SmilingWolf/wd-swinv2-tagger-v3",
+     "label": "WD SwinV2 v3", "remark": "动漫，速度较快", "size_gb": 0.34},
+    {"id": "wd-vit-tagger-v3",
+     "repo": "SmilingWolf/wd-vit-tagger-v3",
+     "label": "WD ViT v3", "remark": "动漫，体积最小", "size_gb": 0.35},
+    # 以下 v2 系列没有出 v3 版本，继续保留
     {"id": "wd-v1-4-moat-tagger-v2",
      "repo": "SmilingWolf/wd-v1-4-moat-tagger-v2",
-     "label": "WD MOAT v2", "size": "约 320MB"},
+     "label": "WD MOAT v2", "remark": "动漫，无 v3 版", "size_gb": 0.32},
     {"id": "wd-v1-4-convnextv2-tagger-v2",
      "repo": "SmilingWolf/wd-v1-4-convnextv2-tagger-v2",
-     "label": "WD ConvNeXtV2 v2", "size": "约 390MB"},
-    {"id": "wd-v1-4-swinv2-tagger-v2",
-     "repo": "SmilingWolf/wd-v1-4-swinv2-tagger-v2",
-     "label": "WD SwinV2 v2", "size": "约 350MB"},
-    {"id": "wd-v1-4-convnext-tagger-v2",
-     "repo": "SmilingWolf/wd-v1-4-convnext-tagger-v2",
-     "label": "WD ConvNeXt v2", "size": "约 340MB"},
-    {"id": "wd-v1-4-vit-tagger-v2",
-     "repo": "SmilingWolf/wd-v1-4-vit-tagger-v2",
-     "label": "WD ViT v2（最小）", "size": "约 360MB"},
+     "label": "WD ConvNeXtV2 v2", "remark": "动漫，无 v3 版", "size_gb": 0.38},
 ]
 DEFAULT_FILES = ["model.onnx", "selected_tags.csv"]
 
@@ -75,30 +80,30 @@ CL_MODELS = [
     {"id": "cl_tagger_1_02", "engine": "cl",
      "repo": "cella110n/cl_tagger",
      "files": ["cl_tagger_1_02/model.onnx", "cl_tagger_1_02/tag_mapping.json"],
-     "label": "CL Tagger v1.02（SigLIP2，4.2万标签，推荐阈值 0.9）",
-     "size": "约 1.4GB", "def_gen": 0.9, "def_char": 0.9},
+     "label": "CL Tagger v1.02", "remark": "SigLIP2，4.2万标签，推荐阈值 0.9",
+     "size_gb": 1.4, "def_gen": 0.9, "def_char": 0.9},
     {"id": "cl_tagger_1_01", "engine": "cl",
      "repo": "cella110n/cl_tagger",
      "files": ["cl_tagger_1_01/model.onnx", "cl_tagger_1_01/tag_mapping.json"],
-     "label": "CL Tagger v1.01（SigLIP2，4.2万标签）",
-     "size": "约 1.4GB", "def_gen": 0.6, "def_char": 0.6},
+     "label": "CL Tagger v1.01", "remark": "SigLIP2，4.2万标签",
+     "size_gb": 1.4, "def_gen": 0.6, "def_char": 0.85},
     {"id": "cl_tagger_1_00", "engine": "cl",
      "repo": "cella110n/cl_tagger",
      "files": ["cl_tagger_1_00/model.onnx", "cl_tagger_1_00/tag_mapping.json"],
-     "label": "CL Tagger v1.00（SigLIP2，4.2万标签）",
-     "size": "约 1.4GB", "def_gen": 0.6, "def_char": 0.6},
+     "label": "CL Tagger v1.00", "remark": "SigLIP2，4.2万标签",
+     "size_gb": 1.4, "def_gen": 0.6, "def_char": 0.85},
     {"id": "cl_tagger_v2_01a", "engine": "cl", "gated": True,
      "repo": "cella110n/cl_tagger_v2",
      "files": ["v2_01a/model.onnx", "v2_01a/model.onnx.data",
                "v2_01a/model_vocabulary.json", "v2_01a/model_metadata.json"],
-     "label": "CL Tagger v2.01a（SigLIP2 最新，需 HF Token）",
-     "size": "约 2.1GB", "def_gen": 0.5, "def_char": 0.5},
+     "label": "CL Tagger v2.01a", "remark": "SigLIP2 最新，需 HF Token",
+     "size_gb": 2.1, "def_gen": 0.55, "def_char": 0.85},
     {"id": "cl_tagger_v2_00", "engine": "cl", "gated": True,
      "repo": "cella110n/cl_tagger_v2",
      "files": ["v2_00/model.onnx", "v2_00/model.onnx.data",
                "v2_00/model_vocabulary.json", "v2_00/model_metadata.json"],
-     "label": "CL Tagger v2.00（SigLIP2，需 HF Token）",
-     "size": "约 2.1GB", "def_gen": 0.5, "def_char": 0.5},
+     "label": "CL Tagger v2.00", "remark": "SigLIP2，需 HF Token",
+     "size_gb": 2.1, "def_gen": 0.55, "def_char": 0.85},
 ]
 
 CL_DEFAULT_PROCESSOR = "google/siglip2-so400m-patch16-naflex"
@@ -115,6 +120,16 @@ def load_config():
     cfg.setdefault("mirror", "mirror")          # mirror | official
     cfg.setdefault("custom_models", [])         # [{id, repo, label, size, files}]
     cfg.setdefault("hidden", [])                # 下拉框隐藏的模型 id
+    cfg.setdefault("thresholds", {})            # 每个标签模型的默认阈值 {id: {gen, char}}
+    cfg.setdefault("tr_color", "#00b894")       # 翻译文字颜色
+    cfg.setdefault("tr_size", 13)               # 翻译文字字号(px)
+    if not (isinstance(cfg["tr_color"], str) and len(cfg["tr_color"]) == 7
+            and cfg["tr_color"].startswith("#")):
+        cfg["tr_color"] = "#00b894"
+    try:
+        cfg["tr_size"] = min(40, max(9, int(cfg["tr_size"])))
+    except (TypeError, ValueError):
+        cfg["tr_size"] = 13
     cfg.pop("hf_token", None)                   # Token 只存内存，不落盘
     return cfg
 
@@ -183,9 +198,10 @@ def scan_nl_models():
             continue
         size = os.path.getsize(os.path.join(MODEL_DIR, f)) / 1024**3
         models["gguf:" + stem] = {
-            "label": f"{stem}（≈{size:.1f}G）",
+            "label": stem,
             "model": f,
             "mmproj": mmprojs[best],
+            "size_gb": round(size, 1),
         }
     return models
 
@@ -327,10 +343,9 @@ def _load_wd14(model_id, cfg):
         so = ort.SessionOptions()
         so.log_severity_level = 3
         avail = ort.get_available_providers()
-        providers = []
-        if "CUDAExecutionProvider" in avail:
-            providers.append("CUDAExecutionProvider")
-        providers.append("CPUExecutionProvider")
+        # GPU 优先：CUDA → DirectML（Windows 免装 CUDA/cuDNN）→ CPU
+        providers = [p for p in ("CUDAExecutionProvider", "DmlExecutionProvider")
+                     if p in avail] + ["CPUExecutionProvider"]
         try:
             sess = ort.InferenceSession(onnx_path, sess_options=so, providers=providers)
         except Exception as e:
@@ -372,7 +387,7 @@ def _escape_tag(tag):
 
 
 def _wd14_interrogate(model_id, pil_img, gen_t, char_t, cfg):
-    """返回 (字符标签列表, 普通标签列表)，各自按置信度降序。"""
+    """返回 (字符标签列表, 普通标签列表)，元素为 (标签, 置信度)，各自按置信度降序。"""
     sess, tags = _load_wd14(model_id, cfg)
     _, height, _, _ = sess.get_inputs()[0].shape
     x = _preprocess(pil_img, height)
@@ -386,7 +401,7 @@ def _wd14_interrogate(model_id, pil_img, gen_t, char_t, cfg):
             general.append((name, float(conf)))
     chars.sort(key=lambda t: -t[1])
     general.sort(key=lambda t: -t[1])
-    return [c[0] for c in chars], [g[0] for g in general]
+    return chars, general
 
 
 # ---------------------------------------------------------------- CL Tagger 推理 ---
@@ -480,25 +495,27 @@ def _load_cl(model_id, cfg):
                     idx_to_tag[int(k)] = tag
                     tag_to_cat[tag] = str(v.get("category", "Unknown")).capitalize()
 
-        # 预处理器（第一次使用会联网下载处理器配置，走配置的下载源）
-        processor_repo = CL_DEFAULT_PROCESSOR
+        # 预处理器（仅 v2 需要：v1 的 onnx 内嵌固定位置编码，走本地固定尺寸预处理）
+        processor = None
         meta_path = os.path.join(d, sub, "model_metadata.json")
-        if os.path.isfile(meta_path):
+        fixed_size = 448
+        if os.path.isfile(meta_path):   # v2：动态分辨率（NaFlex），需要 AutoProcessor
+            fixed_size = None
             with open(meta_path, "r", encoding="utf-8") as f:
                 processor_repo = json.load(f).get(
                     "vision_encoder_repo", CL_DEFAULT_PROCESSOR)
-        _set_hf_endpoint(cfg)
-        try:
-            import torch   # noqa: F401  先就绪 CUDA DLL
-        except ImportError:
-            pass
-        proc_dir = _ensure_processor(processor_repo, cfg)
-        from transformers import AutoProcessor
-        try:
-            processor = AutoProcessor.from_pretrained(proc_dir,
-                                                      local_files_only=True)
-        except Exception:
-            processor = AutoProcessor.from_pretrained(processor_repo)
+            _set_hf_endpoint(cfg)
+            try:
+                import torch   # noqa: F401  先就绪 CUDA DLL
+            except ImportError:
+                pass
+            proc_dir = _ensure_processor(processor_repo, cfg)
+            from transformers import AutoProcessor
+            try:
+                processor = AutoProcessor.from_pretrained(proc_dir,
+                                                          local_files_only=True)
+            except Exception:
+                processor = AutoProcessor.from_pretrained(processor_repo)
 
         # ONNX 会话（v2 的 model.onnx 依赖同目录的 model.onnx.data）
         onnx_file = next(f for f in m["files"] if f.endswith(".onnx"))
@@ -506,8 +523,9 @@ def _load_cl(model_id, cfg):
         so = ort.SessionOptions()
         so.log_severity_level = 3
         avail = ort.get_available_providers()
-        providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in avail
-                     else []) + ["CPUExecutionProvider"]
+        # GPU 优先：CUDA → DirectML（Windows 免装 CUDA/cuDNN）→ CPU
+        providers = [p for p in ("CUDAExecutionProvider", "DmlExecutionProvider")
+                     if p in avail] + ["CPUExecutionProvider"]
         try:
             sess = ort.InferenceSession(os.path.join(d, onnx_file),
                                         sess_options=so, providers=providers)
@@ -518,7 +536,7 @@ def _load_cl(model_id, cfg):
                                         providers=["CPUExecutionProvider"])
         print(f"[tagger] {model_id} providers: {sess.get_providers()}")
 
-        _cl_sessions[model_id] = (sess, processor, idx_to_tag, tag_to_cat)
+        _cl_sessions[model_id] = (sess, processor, idx_to_tag, tag_to_cat, fixed_size)
         return _cl_sessions[model_id]
 
 
@@ -526,23 +544,32 @@ def _cl_interrogate(model_id, pil_img, gen_t, char_t, cfg):
     """CL Tagger 推理。返回 (字符标签列表, 普通标签列表)，按置信度降序。
     Character/Copyright 记为字符标签；General 记为普通标签；
     Rating/Quality/Meta/Model 不写入训练标签。"""
-    sess, processor, idx_to_tag, tag_to_cat = _load_cl(model_id, cfg)
+    sess, processor, idx_to_tag, tag_to_cat, fixed_size = _load_cl(model_id, cfg)
     pil_img = pil_img.convert("RGB")
-    if max(pil_img.size) > 2048:
-        pil_img.thumbnail((2048, 2048))
-    try:
-        inputs = processor(images=pil_img, return_tensors="pt", max_num_patches=256)
-    except TypeError:
-        inputs = processor(images=pil_img, return_tensors="pt")
+    if fixed_size:
+        # v1 系列：onnx 内嵌固定位置编码（1025 tokens），输入必须固定 448×448
+        x = pil_img.resize((fixed_size, fixed_size), Image.BICUBIC)
+        x = np.asarray(x, dtype=np.float32) / 255.0
+        x = (x - 0.5) / 0.5
+        feed = {sess.get_inputs()[0].name: x.transpose(2, 0, 1)[None]}
+        out_name = sess.get_outputs()[0].name
+    else:
+        if max(pil_img.size) > 2048:
+            pil_img.thumbnail((2048, 2048))
+        try:
+            inputs = processor(images=pil_img, return_tensors="pt", max_num_patches=256)
+        except TypeError:
+            inputs = processor(images=pil_img, return_tensors="pt")
 
-    feed = {"pixel_values": inputs["pixel_values"].float().numpy()}
-    in_names = {i.name for i in sess.get_inputs()}
-    if "pixel_attention_mask" in in_names:
-        feed["pixel_attention_mask"] = inputs["pixel_attention_mask"].float().numpy()
-    if "spatial_shapes" in in_names:
-        feed["spatial_shapes"] = inputs["spatial_shapes"].numpy().astype(np.int64)
+        feed = {"pixel_values": inputs["pixel_values"].float().numpy()}
+        in_names = {i.name for i in sess.get_inputs()}
+        if "pixel_attention_mask" in in_names:
+            feed["pixel_attention_mask"] = inputs["pixel_attention_mask"].float().numpy()
+        if "spatial_shapes" in in_names:
+            feed["spatial_shapes"] = inputs["spatial_shapes"].numpy().astype(np.int64)
+        out_name = "logits"
 
-    logits = sess.run(["logits"], feed)[0][0].astype(np.float64)
+    logits = sess.run([out_name], feed)[0][0].astype(np.float64)
     probs = 1.0 / (1.0 + np.exp(-logits))
 
     chars, general = [], []
@@ -557,7 +584,7 @@ def _cl_interrogate(model_id, pil_img, gen_t, char_t, cfg):
             general.append((tag, float(p)))
     chars.sort(key=lambda t: -t[1])
     general.sort(key=lambda t: -t[1])
-    return [c[0] for c in chars], [g[0] for g in general]
+    return chars, general
 
 
 # ---------------------------------------------------------------- 自然语言打标 ---
@@ -605,7 +632,11 @@ def _load_llama(key, n_ctx=8192):
 def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192):
     _load_llama(key, n_ctx)
     pil_img = pil_img.convert("RGB")
-    if max(pil_img.size) > max_side:
+    try:
+        max_side = int(max_side)
+    except (TypeError, ValueError):
+        max_side = 1536
+    if max_side > 0 and max(pil_img.size) > max_side:
         pil_img.thumbnail((max_side, max_side))
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
@@ -693,8 +724,8 @@ def _run_job(cfg, model_cfg):
                         else:
                             chars, general = _wd14_interrogate(
                                 model, im, cfg["gen_t"], cfg["char_t"], model_cfg)
-                        body = ", ".join([_escape_tag(c) for c in chars]
-                                         + [_escape_tag(g) for g in general])
+                        body = ", ".join([_escape_tag(t) for t, _ in chars]
+                                         + [_escape_tag(t) for t, _ in general])
                     else:
                         body = _nl_interrogate(
                             model, im, cfg.get("nl_prompt", ""),
@@ -803,9 +834,11 @@ def _run_compare(models, params):
                         chars, general = _wd14_interrogate(
                             m["id"], im, params["gen_t"], params["char_t"],
                             model_cfg)
+                    items = chars + general
                     res["output"] = ", ".join(
-                        [_escape_tag(c) for c in chars]
-                        + [_escape_tag(g) for g in general])
+                        [_escape_tag(t) for t, _ in items])
+                    # 附带置信度（3 位小数），对比页在每个标签旁展示
+                    res["detail"] = [[t, round(c, 3)] for t, c in items]
                 else:
                     res["output"] = _nl_interrogate(
                         m["id"], im, params["nl_prompt"],
@@ -869,6 +902,8 @@ def start_compare(models, params):
                                or DEFAULT_NL_PROMPT}
     except (TypeError, ValueError):
         return False, "参数必须是数字"
+    if params["res"] < 0 or params["n_ctx"] < 512:
+        return False, "分辨率/上下文参数不合法"
     threading.Thread(target=_run_compare, args=(picked, params), daemon=True).start()
     return True, "开始对比"
 
@@ -882,6 +917,80 @@ app = Flask(__name__)
 def no_store(resp):
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# ---------------------------------------------------------------- 结果翻译 ---
+
+# 复用统一启动器 model/ 目录下的腾讯 Hy-MT2-1.8B 离线翻译模型（与 editor / lora_inspect 共用）
+try:
+    from llama_cpp import Llama as _MtLlama
+    _MT_OK = True
+except Exception:
+    _MT_OK = False
+
+_MT_MODEL_NAME = "Hy-MT2-1.8B-Q4_K_M.gguf"
+_MT_LANGS = [
+    ("中文（简体）", "Simplified Chinese"),
+    ("中文（繁体）", "Traditional Chinese"),
+    ("English", "English"),
+    ("日本語", "Japanese"),
+    ("한국어", "Korean"),
+    ("粵語", "Cantonese"),
+    ("Français", "French"),
+    ("Deutsch", "German"),
+    ("Español", "Spanish"),
+    ("Русский", "Russian"),
+    ("Português", "Portuguese"),
+    ("Italiano", "Italian"),
+]
+_mt_lock = threading.Lock()   # llama.cpp 不支持并发推理，必须串行化
+
+
+def _mt_model_path():
+    return os.path.join(MODEL_DIR, _MT_MODEL_NAME)
+
+
+@app.post("/api/translate")
+def api_translate():
+    """按需加载翻译模型 → 逐条翻译 → 立刻卸载释放显存。"""
+    data = request.get_json(silent=True) or {}
+    texts = [t.strip() for t in (data.get("texts") or [])
+             if isinstance(t, str) and t.strip()]
+    lang = data.get("lang") or "Simplified Chinese"
+    if lang not in [v for _, v in _MT_LANGS]:
+        lang = "Simplified Chinese"
+    if not texts:
+        return jsonify({"ok": False, "error": "没有要翻译的内容"}), 400
+    if not _MT_OK:
+        return jsonify({"ok": False, "error": "未安装 llama-cpp-python，请先安装"}), 400
+    mp = _mt_model_path()
+    if not os.path.isfile(mp):
+        return jsonify({"ok": False,
+                        "error": f"缺少翻译模型文件：{_MT_MODEL_NAME}"
+                                 "（可先在 editor 或 Lora参数分析 里下载，模型在统一启动器 model/ 目录共用）"}), 400
+    out = []
+    with _mt_lock:
+        llm = None
+        try:
+            llm = _MtLlama(model_path=mp, n_gpu_layers=-1, n_ctx=2048,
+                           verbose=False)
+            for t in texts:
+                prompt = (f"Translate the following segment into {lang}, "
+                          f"without additional explanation.\n\n{t}")
+                resp = llm.create_chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=512, temperature=0.0)
+                out.append(resp["choices"][0]["message"]["content"].strip())
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({"ok": False, "error": f"{e.__class__.__name__}: {e}",
+                            "translations": out}), 500
+        finally:
+            if llm is not None:
+                del llm   # 翻译完立刻卸载释放显存
+                import gc
+                gc.collect()
+    return jsonify({"ok": True, "translations": out})
 
 
 @app.get("/ping")
@@ -957,7 +1066,7 @@ PAGE = r"""<!doctype html>
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex;
            align-items:center; justify-content:center; z-index:1000; }
   .modal-card { background:var(--card); border:1px solid var(--border); border-radius:12px;
-           padding:20px 24px; width:min(760px, 94vw); max-height:88vh; overflow:auto;
+           padding:20px 24px; width:min(1080px, 96vw); max-height:88vh; overflow:auto;
            box-shadow:0 8px 30px rgba(0,0,0,.25); }
   table { width:100%; border-collapse:collapse; font-size:13px; margin:8px 0; }
   th,td { padding:6px 8px; text-align:left; border-bottom:1px solid var(--border);
@@ -996,9 +1105,21 @@ PAGE = r"""<!doctype html>
   .rcard .rsec { opacity:.6; font-size:12px; margin-left:auto; flex-shrink:0; }
   .rcard .rtag { font-family:Consolas,monospace; font-size:13px; line-height:1.6;
                  word-break:break-all; }
+  .rcard .rtagi { display:inline-block; margin:0 10px 2px 0; }
+  .rcard .rtagi i { font-style:normal; opacity:.55; font-size:11px; }
   .rcard .rnl { font-size:13.5px; line-height:1.7; white-space:pre-wrap; }
   .rcard .rerr { color:#c0392b; font-size:13px; white-space:pre-wrap; }
   body.dark .rcard .rerr { color:#ff7675; }
+  .rcard .rzh { color:var(--tr-color, #00b894); font-size:var(--tr-size, 13px);
+                margin-top:8px; line-height:1.6; white-space:pre-wrap; }
+  .dropzone { margin:0 0 12px 120px; border:2px dashed var(--input-border);
+              border-radius:10px; padding:22px 16px; text-align:center; cursor:pointer;
+              color:var(--muted, inherit); font-size:13.5px;
+              transition:border-color .2s, background .2s; }
+  .dropzone:hover { border-color:#0984e3; }
+  .dropzone.drag { border-color:#0984e3; background:rgba(9,132,227,.08); }
+  .dropzone img { max-height:140px; max-width:280px; border-radius:8px;
+                  border:1px solid var(--border); display:block; margin:0 auto 8px; }
 </style>
 </head>
 <body>
@@ -1008,6 +1129,7 @@ PAGE = r"""<!doctype html>
   <div class="tabs">
     <button class="tab active" id="tabBatch" onclick="switchTab('batch')">批量打标</button>
     <button class="tab" id="tabCmp" onclick="switchTab('cmp')">效果对比</button>
+    <button id="cfgBtn" class="plain" onclick="openConfig()" style="margin-left:auto">配置…</button>
   </div>
 
   <div id="batchView">
@@ -1034,7 +1156,6 @@ PAGE = r"""<!doctype html>
     <div class="row">
       <label class="lab">模型</label>
       <select id="model"></select>
-      <button id="cfgBtn" class="plain" onclick="openConfig()">配置…</button>
     </div>
 
     <div class="row" id="threshRow">
@@ -1060,6 +1181,7 @@ PAGE = r"""<!doctype html>
         </select>
         <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
         <select id="nl_res">
+          <option value="0">原始分辨率</option>
           <option value="768">768（快）</option>
           <option value="1024">1024（均衡）</option>
           <option value="1536" selected>1536（高清）</option>
@@ -1104,11 +1226,10 @@ PAGE = r"""<!doctype html>
   <div class="card">
     <h2>⚖️ 效果对比（单张图片 · 多模型同时打标）</h2>
 
-    <div class="row">
-      <label class="lab">图片</label>
-      <input type="file" id="cmpFile" accept=".jpg,.jpeg,.png,.webp,.bmp,.gif">
-      <img id="cmpThumb" style="display:none; max-height:110px; max-width:220px;
-           border-radius:8px; border:1px solid var(--border);" alt="">
+    <div class="dropzone" id="dropZone">
+      <input type="file" id="cmpFile" accept=".jpg,.jpeg,.png,.webp,.bmp,.gif" style="display:none">
+      <img id="cmpThumb" style="display:none" alt="">
+      <div id="dzHint">📎 点击选择图片，或把图片拖到这里</div>
     </div>
 
     <div class="row">
@@ -1133,6 +1254,7 @@ PAGE = r"""<!doctype html>
       </select>
       <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
       <select id="cmp_res">
+        <option value="0">原始分辨率</option>
         <option value="768">768（快）</option>
         <option value="1024">1024（均衡）</option>
         <option value="1536" selected>1536（高清）</option>
@@ -1153,6 +1275,17 @@ PAGE = r"""<!doctype html>
       <span id="cmpInfo" class="tip"></span>
     </div>
 
+    <div class="row" id="trRow" style="display:none">
+      <label class="lab">翻译结果</label>
+      <select id="tr_lang" style="min-width:150px"></select>
+      <input type="color" id="tr_color" value="#00b894" title="翻译文字颜色"
+             style="width:42px; height:34px; padding:2px; cursor:pointer">
+      <input type="number" id="tr_size" value="13" min="9" max="40" title="翻译文字字号"
+             style="width:64px">
+      <button class="plain" id="trBtn" onclick="translateResults()">翻译</button>
+      <span id="trInfo" class="tip"></span>
+    </div>
+
     <div id="cmpResults"></div>
   </div>
   </div><!-- /cmpView -->
@@ -1168,8 +1301,10 @@ PAGE = r"""<!doctype html>
       <label class="radio"><input type="radio" name="dlsrc" value="official"> 官方（huggingface.co）</label>
     </div>
     <table>
-      <thead><tr><th style="width:44px">显示</th><th>模型</th><th style="width:60px">类型</th>
-        <th style="width:80px">状态</th><th style="width:150px">操作</th></tr></thead>
+      <thead><tr><th style="width:44px">显示</th><th>模型</th>
+        <th style="width:64px">大小(G)</th><th style="width:88px">状态</th>
+        <th style="width:70px">标签阈值</th><th style="width:70px">角色阈值</th>
+        <th style="width:170px">备注</th><th style="width:120px">操作</th></tr></thead>
       <tbody id="cfgBody"></tbody>
     </table>
     <div class="tip">取消勾选"显示"可把模型从主界面下拉框中隐藏。"下载"按上方选择的下载源优先，
@@ -1235,7 +1370,7 @@ function renderModels() {
     for (const m of list) {
         const o = document.createElement('option');
         o.value = m.id;
-        o.textContent = m.label + (m.installed ? '' : '（未下载' + (m.size ? ' ' + m.size : '') + '）');
+        o.textContent = m.label + (m.installed ? '' : '（未下载）');
         o.disabled = !m.installed;
         sel.appendChild(o);
     }
@@ -1335,26 +1470,77 @@ async function saveMirror() {
 function renderCfgTable() {
     const tb = $('cfgBody');
     tb.innerHTML = '';
-    for (const m of models) {
-        const tr = document.createElement('tr');
+    // 标签模型 / 自然语言模型分两组显示，组间插入标题行
+    const groups = [
+        { kind: 'tag', title: '🏷️ 标签打标模型' },
+        { kind: 'nl', title: '💬 自然语言打标模型' },
+    ];
+    for (const g of groups) {
+        const rows = models.filter(m => m.kind === g.kind);
+        if (rows.length === 0) continue;
+        const gtr = document.createElement('tr');
+        const gtd = document.createElement('td');
+        gtd.colSpan = 8;
+        gtd.textContent = g.title;
+        gtd.style.cssText = 'font-weight:600; text-align:left; ' +
+            'background:rgba(255,255,255,.06); letter-spacing:1px;';
+        gtr.appendChild(gtd);
+        tb.appendChild(gtr);
+        for (const m of rows) {
+            const tr = document.createElement('tr');
 
-        const tdv = document.createElement('td');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox'; cb.checked = m.visible;
-        cb.onchange = () => toggleVisible(m.id, cb.checked);
-        tdv.appendChild(cb);
+            const tdv = document.createElement('td');
+            tdv.style.textAlign = 'center';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox'; cb.checked = m.visible;
+            cb.onchange = () => toggleVisible(m.id, cb.checked);
+            tdv.appendChild(cb);
 
-        const tdl = document.createElement('td');
-        tdl.textContent = m.label;
-        const kind = document.createElement('td');
-        kind.textContent = m.kind === 'tag' ? '标签' : '自然语言';
-        const tds = document.createElement('td');
+            const tdl = document.createElement('td');
+            tdl.textContent = m.label;
+            const tdsz = document.createElement('td');
+            tdsz.textContent = m.size_gb ? (m.kind === 'nl' ? '≈' + m.size_gb : m.size_gb) : '-';
+            const tds = document.createElement('td');
         if (m.installed) tds.textContent = '已下载';
         else if (m.kind !== 'tag') tds.textContent = '本地';
         else tds.textContent = m.gated ? '未下载·需HF登录' : '未下载';
         tds.style.color = m.installed ? 'var(--ok, #1b7a3d)' : 'inherit';
+        const tdr = document.createElement('td');
+        tdr.textContent = m.remark || '';
+
+        // 标签模型可编辑默认阈值（change 即保存），自然语言模型显示 —
+        const thrs = [];
+        if (m.kind === 'tag') {
+            for (const [key, val] of [['gen', m.def_gen], ['char', m.def_char]]) {
+                const td = document.createElement('td');
+                td.style.textAlign = 'center';
+                const inp = document.createElement('input');
+                inp.type = 'number'; inp.min = '0.01'; inp.max = '1'; inp.step = '0.01';
+                inp.value = val;
+                inp.style.cssText = 'width:58px; padding:3px 5px; border-radius:6px;'
+                    + 'border:1px solid var(--input-border); background:var(--input-bg);'
+                    + 'color:var(--text); font-size:12.5px;';
+                inp.onchange = () => {
+                    const v = parseFloat(inp.value);
+                    if (isNaN(v) || v <= 0 || v > 1) {
+                        inp.value = val;
+                        return;
+                    }
+                    saveThr(m.id, key, v);
+                };
+                td.appendChild(inp);
+                thrs.push(td);
+            }
+        } else {
+            thrs.push(Object.assign(document.createElement('td'),
+                { textContent: '—', style: 'text-align:center; opacity:.5' }));
+            thrs.push(Object.assign(document.createElement('td'),
+                { textContent: '—', style: 'text-align:center; opacity:.5' }));
+        }
 
         const tdo = document.createElement('td');
+        tdo.style.textAlign = 'center';
+        tdo.style.whiteSpace = 'nowrap';
         if (m.kind === 'tag' && !m.installed) {
             const bd = document.createElement('button');
             bd.className = 'mini'; bd.textContent = '下载';
@@ -1364,13 +1550,13 @@ function renderCfgTable() {
         if (m.kind === 'tag' && m.installed) {
             const bx = document.createElement('button');
             bx.className = 'mini danger'; bx.textContent = '删除';
-            bx.style.marginLeft = '6px';
             bx.onclick = () => delModelArm(m.id, bx);
             tdo.appendChild(bx);
         }
 
-        tr.append(tdv, tdl, kind, tds, tdo);
-        tb.appendChild(tr);
+            tr.append(tdv, tdl, tdsz, tds, ...thrs, tdr, tdo);
+            tb.appendChild(tr);
+        }
     }
 }
 
@@ -1378,6 +1564,16 @@ async function toggleVisible(id, visible) {
     await fetch('/api/config', { method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ hidden_delta: { id, hide: !visible } }) });
+    await loadModels();
+}
+
+// 保存单个模型的默认阈值（标签或角色），并刷新主界面下拉数据
+async function saveThr(id, key, val) {
+    const d = { id };
+    d[key] = val;
+    await fetch('/api/config', { method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ thresholds: d }) });
     await loadModels();
 }
 
@@ -1569,7 +1765,7 @@ function renderCmpModels() {
     grid.innerHTML = '';
     const list = models.filter(m => m.installed);
     if (!list.length) {
-        grid.innerHTML = '<span class="tip" style="margin-left:-120px">没有已下载的模型，请先在"批量打标"页的配置窗口下载</span>';
+        grid.innerHTML = '<span class="tip" style="margin-left:-120px">没有已下载的模型，请先在右上角"配置…"里下载</span>';
         return;
     }
     for (const m of list) {
@@ -1577,6 +1773,13 @@ function renderCmpModels() {
         lab.className = 'mchip';
         const cb = document.createElement('input');
         cb.type = 'checkbox'; cb.value = m.id; cb.dataset.kind = m.kind;
+        cb.onchange = () => {
+            // 勾选标签模型时自动填入该模型的默认阈值（同主界面逻辑）
+            if (cb.checked && m.kind === 'tag' && m.def_gen != null) {
+                $('cmp_gen_t').value = m.def_gen;
+                $('cmp_char_t').value = m.def_char;
+            }
+        };
         const badge = document.createElement('span');
         badge.className = 'badge ' + m.kind;
         badge.textContent = m.kind === 'tag' ? '标签' : 'NL';
@@ -1585,14 +1788,31 @@ function renderCmpModels() {
     }
 }
 
-$('cmpFile').onchange = () => {
+// 图片：点击选择 + 拖拽放入
+const dz = $('dropZone');
+dz.onclick = () => $('cmpFile').click();
+dz.ondragover = e => { e.preventDefault(); dz.classList.add('drag'); };
+dz.ondragleave = () => dz.classList.remove('drag');
+dz.ondrop = e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    if (e.dataTransfer.files.length) {
+        $('cmpFile').files = e.dataTransfer.files;
+        showCmpThumb();
+    }
+};
+$('cmpFile').onchange = showCmpThumb;
+
+function showCmpThumb() {
     const f = $('cmpFile').files[0];
     const th = $('cmpThumb');
-    if (!f) { th.style.display = 'none'; return; }
+    if (!f) { th.style.display = 'none'; $('dzHint').textContent = '📎 点击选择图片，或把图片拖到这里'; return; }
     const rd = new FileReader();
-    rd.onload = e => { th.src = e.target.result; th.style.display = ''; };
+    rd.onload = e => {
+        th.src = e.target.result; th.style.display = '';
+        $('dzHint').textContent = '✅ ' + f.name + '（点击可更换）';
+    };
     rd.readAsDataURL(f);
-};
+}
 
 async function runCompare() {
     const chips = [...document.querySelectorAll('#cmpModels input:checked')];
@@ -1623,6 +1843,72 @@ function escapeHtml(s) {
     return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ---- 对比结果翻译（复用 Hy-MT2 离线翻译模型）----
+const TR_LANGS = [["中文（简体）","Simplified Chinese"],["中文（繁体）","Traditional Chinese"],
+    ["English","English"],["日本語","Japanese"],["한국어","Korean"],["粵語","Cantonese"],
+    ["Français","French"],["Deutsch","German"],["Español","Spanish"],["Русский","Russian"],
+    ["Português","Portuguese"],["Italiano","Italian"]];
+for (const [lab, val] of TR_LANGS) {
+    const o = document.createElement('option');
+    o.value = val; o.textContent = lab;
+    $('tr_lang').appendChild(o);
+}
+
+// 翻译文字样式（颜色/字号）：即时生效并永久保存
+function applyTrStyle() {
+    document.documentElement.style.setProperty('--tr-color', $('tr_color').value);
+    document.documentElement.style.setProperty('--tr-size', $('tr_size').value + 'px');
+}
+function saveTrStyle() {
+    applyTrStyle();
+    fetch('/api/config', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tr_style: { color: $('tr_color').value,
+                                           size: parseInt($('tr_size').value) } })
+    }).catch(() => {});
+}
+$('tr_color').oninput = saveTrStyle;
+$('tr_size').onchange = saveTrStyle;
+
+async function translateResults() {
+    const cards = [...document.querySelectorAll('#cmpResults .rcard')]
+        .filter(c => c.dataset.ok === '1' && c.querySelector('.rtag,.rnl'));
+    if (!cards.length) return;
+    const btn = $('trBtn');
+    btn.disabled = true;
+    $('trInfo').innerHTML = '<span class="spin"></span>翻译中…（首次需加载翻译模型）';
+    try {
+        const r = await fetch('/api/translate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ texts: cards.map(c => {
+                const el = c.querySelector('.rtag,.rnl');
+                // 标签卡片里混有置信度，只取纯标签文本
+                if (el.classList.contains('rtag')) {
+                    return [...el.querySelectorAll('.rtagi')]
+                        .map(s => s.dataset.t).join(', ');
+                }
+                return el.textContent;
+            }), lang: $('tr_lang').value })
+        });
+        const d = await r.json();
+        if (!d.ok) {
+            $('trInfo').innerHTML = '<span class="err">❌ ' + escapeHtml(d.error || '翻译失败') + '</span>';
+        } else {
+            cards.forEach((c, i) => {
+                let zh = c.querySelector('.rzh');
+                if (!zh) { zh = document.createElement('div'); zh.className = 'rzh'; c.appendChild(zh); }
+                zh.textContent = (d.translations || [])[i] || '';
+            });
+            $('trInfo').textContent = '✔ 翻译完成';
+        }
+    } catch (e) {
+        $('trInfo').innerHTML = '<span class="err">❌ ' + escapeHtml(String(e)) + '</span>';
+    }
+    btn.disabled = false;
+}
+
+let _cmpRenderN = -1;   // 已渲染的结果卡片数，结果没变化就不重绘（保留翻译内容）
+
 async function pollCmp() {
     try {
         const r = await fetch('/api/compare_status');
@@ -1640,19 +1926,35 @@ async function pollCmp() {
         }
         if (s.error) info += '　<span class="err">❌ ' + escapeHtml(s.error) + '</span>';
         $('cmpInfo').innerHTML = info;
-        if (!s.results || !s.results.length) { $('cmpResults').innerHTML = ''; return; }
+        const n = (s.results || []).length;
+        $('trRow').style.display = n ? '' : 'none';
+        if (!n) {
+            if (_cmpRenderN !== 0) { $('cmpResults').innerHTML = ''; _cmpRenderN = 0; }
+            return;
+        }
+        if (!s.running && n === _cmpRenderN) return;   // 已完成且结果未变，跳过重绘
+        _cmpRenderN = n;
         let html = '';
         for (const res of s.results) {
             const badge = '<span class="badge ' + res.kind + '">'
                         + (res.kind === 'tag' ? '标签' : 'NL') + '</span>';
             let body;
             if (res.ok) {
-                body = '<div class="' + (res.kind === 'tag' ? 'rtag' : 'rnl') + '">'
-                     + escapeHtml(res.output) + '</div>';
+                if (res.kind === 'tag' && Array.isArray(res.detail)) {
+                    // 每个标签旁展示置信度（3 位小数）
+                    body = '<div class="rtag">' + res.detail.map(d =>
+                        '<span class="rtagi" data-t="' + escapeHtml(d[0]) + '">'
+                        + escapeHtml(d[0]) + ' <i>' + Number(d[1]).toFixed(3) + '</i></span>'
+                    ).join('') + '</div>';
+                } else {
+                    body = '<div class="' + (res.kind === 'tag' ? 'rtag' : 'rnl') + '">'
+                         + escapeHtml(res.output) + '</div>';
+                }
             } else {
                 body = '<div class="rerr">❌ ' + escapeHtml(res.error) + '</div>';
             }
-            html += '<div class="rcard"><div class="rhead">' + badge
+            html += '<div class="rcard" data-ok="' + (res.ok ? 1 : 0) + '">'
+                  + '<div class="rhead">' + badge
                   + '<b>' + escapeHtml(res.label) + '</b>'
                   + '<span class="rsec">' + (res.sec ? res.sec + 's' : '') + '</span></div>'
                   + body + '</div>';
@@ -1667,6 +1969,12 @@ async function pollCmp() {
 
 // ---- 初始化 ----
 (async function init() {
+    try {
+        const c = await (await fetch('/api/config')).json();
+        if (c.tr_color) $('tr_color').value = c.tr_color;
+        if (c.tr_size) $('tr_size').value = c.tr_size;
+        applyTrStyle();
+    } catch (e) {}
     try {
         const r = await fetch('/api/nl_prompt');
         const j = await r.json();
@@ -1692,18 +2000,26 @@ def index():
 def _all_models(cfg):
     """主界面下拉框 + 配置窗口共用的模型清单。"""
     models = []
+    thr_map = cfg.get("thresholds") or {}
     for m in WD14_MODELS + CL_MODELS:
+        engine = m.get("engine", "wd14")
+        # 默认阈值：配置页设置优先，否则用注册表内置值（WD 无内置 → 0.35 / 0.85）
+        t = thr_map.get(m["id"]) or {}
+        def_gen = t.get("gen", m.get("def_gen", 0.35))
+        def_char = t.get("char", m.get("def_char", 0.85))
         models.append({"id": m["id"], "label": m["label"], "kind": "tag",
-                       "size": m["size"], "custom": False,
-                       "engine": m.get("engine", "wd14"),
+                       "remark": m.get("remark", ""), "size_gb": m.get("size_gb", 0),
+                       "custom": False,
+                       "engine": engine,
                        "gated": m.get("gated", False),
-                       "def_gen": m.get("def_gen", 0.35),
-                       "def_char": m.get("def_char", 0.85),
+                       "def_gen": def_gen,
+                       "def_char": def_char,
                        "visible": m["id"] not in cfg.get("hidden", []),
                        "installed": model_installed(m)})
     for key, m in scan_nl_models().items():
         models.append({"id": key, "label": m["label"], "kind": "nl",
-                       "size": "", "custom": False,
+                       "remark": "本地视觉模型，可调提示词", "size_gb": m.get("size_gb", 0),
+                       "custom": False,
                        "visible": key not in cfg.get("hidden", []),
                        "installed": True})
     return models
@@ -1750,6 +2066,38 @@ def api_config_post():
                 hid.remove(mid)
             save_config(cfg)
         return jsonify({"ok": True})
+
+    if "thresholds" in data:   # 单个标签模型的默认阈值 {id, gen, char}
+        d = data.get("thresholds") or {}
+        mid = d.get("id")
+        if not mid:
+            return jsonify({"ok": False, "error": "缺少模型 id"}), 400
+        tmap = cfg.setdefault("thresholds", {})
+        entry = tmap.setdefault(mid, {})
+        try:
+            entry["gen"] = round(min(1.0, max(0.01, float(d.get("gen")))), 2)
+        except (TypeError, ValueError):
+            pass
+        try:
+            entry["char"] = round(min(1.0, max(0.01, float(d.get("char")))), 2)
+        except (TypeError, ValueError):
+            pass
+        save_config(cfg)
+        return jsonify({"ok": True})
+
+    if "tr_style" in data:   # 翻译文字颜色/字号，永久保存
+        d = data.get("tr_style") or {}
+        c = d.get("color")
+        if (isinstance(c, str) and len(c) == 7 and c.startswith("#")
+                and all(ch in "0123456789abcdefABCDEF" for ch in c[1:])):
+            cfg["tr_color"] = c
+        try:
+            cfg["tr_size"] = min(40, max(9, int(d.get("size"))))
+        except (TypeError, ValueError):
+            pass
+        save_config(cfg)
+        return jsonify({"ok": True, "tr_color": cfg["tr_color"],
+                        "tr_size": cfg["tr_size"]})
 
     return jsonify({"ok": False, "error": "无效的配置操作"}), 400
 
