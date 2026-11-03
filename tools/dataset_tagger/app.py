@@ -11,6 +11,8 @@
 - 模型配置窗口：增删自定义模型、控制下拉框显示、下载模型、选择下载源（镜像/官方），
   窗口底部显示下载进度。未下载的模型在下拉框中置灰
 - 模型配置持久化在 model/tagger/config.json
+- 效果对比页：上传单张图片，勾选多个已下载模型（标签 + 自然语言可混选）同时打标，
+  共用标签阈值 / 角色阈值 / 上下文长度 / 图片分辨率，结果显示在页面上
 端口：7869
 """
 
@@ -401,6 +403,39 @@ def _set_hf_endpoint(cfg):
         os.environ["HF_ENDPOINT"] = endpoint
 
 
+def _ensure_processor(repo, cfg):
+    """把预处理器的小配置文件下载到本地目录（镜像优先、官方兜底），
+    AutoProcessor 直接从本地加载，推理时不再依赖 HF 网络栈。"""
+    name = repo.split("/")[-1]
+    d = os.path.join(TAGGER_DIR, "_hf_processor", name)
+    os.makedirs(d, exist_ok=True)
+    files = ["preprocessor_config.json", "tokenizer_config.json",
+             "tokenizer.json", "special_tokens_map.json", "config.json"]
+    hosts = [MIRRORS.get(cfg.get("mirror", "mirror"), MIRRORS["mirror"])] + \
+            [h for k, h in MIRRORS.items() if k != cfg.get("mirror", "mirror")]
+    for f in files:
+        p = os.path.join(d, f)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            continue
+        last = None
+        for host in hosts:
+            url = f"{host}/{repo}/resolve/main/{f}"
+            try:
+                _url_download(url, p + ".part", lambda _: None, token=_hf_token)
+                os.replace(p + ".part", p)
+                last = None
+                break
+            except Exception as e:
+                last = e
+                try:
+                    os.remove(p + ".part")
+                except OSError:
+                    pass
+        if last is not None:
+            raise RuntimeError(f"下载预处理器配置失败（{repo}/{f}）：{last}")
+    return d
+
+
 def _load_cl(model_id, cfg):
     """加载 CL Tagger（SigLIP2 架构）：HF AutoProcessor 预处理 + onnxruntime 推理。"""
     if model_id in _cl_sessions:
@@ -417,7 +452,10 @@ def _load_cl(model_id, cfg):
 
         # 词表：v2 用 model_vocabulary.json（idx_to_tag/tag_to_category），
         # v1 用 tag_mapping.json（{索引: {tag, category}}）
-        vocab_path = os.path.join(d, "model_vocabulary.json")
+        # 文件可能带仓库子目录（如 cl_tagger_1_02/tag_mapping.json），以 onnx 同目录为准
+        onnx_rel = next(f for f in m["files"] if f.endswith(".onnx"))
+        sub = os.path.dirname(onnx_rel)
+        vocab_path = os.path.join(d, sub, "model_vocabulary.json")
         if os.path.isfile(vocab_path):
             with open(vocab_path, "r", encoding="utf-8") as f:
                 vocab = json.load(f)
@@ -432,7 +470,7 @@ def _load_cl(model_id, cfg):
             idx_to_tag = {int(k): v for k, v in raw_idx.items()}
             tag_to_cat = vocab.get("tag_to_category", {})
         else:
-            tm_path = os.path.join(d, "tag_mapping.json")
+            tm_path = os.path.join(d, sub, "tag_mapping.json")
             with open(tm_path, "r", encoding="utf-8") as f:
                 mapping = json.load(f)
             idx_to_tag, tag_to_cat = {}, {}
@@ -444,7 +482,7 @@ def _load_cl(model_id, cfg):
 
         # 预处理器（第一次使用会联网下载处理器配置，走配置的下载源）
         processor_repo = CL_DEFAULT_PROCESSOR
-        meta_path = os.path.join(d, "model_metadata.json")
+        meta_path = os.path.join(d, sub, "model_metadata.json")
         if os.path.isfile(meta_path):
             with open(meta_path, "r", encoding="utf-8") as f:
                 processor_repo = json.load(f).get(
@@ -454,9 +492,10 @@ def _load_cl(model_id, cfg):
             import torch   # noqa: F401  先就绪 CUDA DLL
         except ImportError:
             pass
+        proc_dir = _ensure_processor(processor_repo, cfg)
         from transformers import AutoProcessor
         try:
-            processor = AutoProcessor.from_pretrained(processor_repo,
+            processor = AutoProcessor.from_pretrained(proc_dir,
                                                       local_files_only=True)
         except Exception:
             processor = AutoProcessor.from_pretrained(processor_repo)
@@ -524,7 +563,7 @@ def _cl_interrogate(model_id, pil_img, gen_t, char_t, cfg):
 # ---------------------------------------------------------------- 自然语言打标 ---
 
 _llama_model = None
-_llama_key = None
+_llama_key = None          # (模型key, n_ctx) 二元组，切换上下文长度也会重载
 _llama_lock = threading.Lock()
 
 DEFAULT_NL_PROMPT = (
@@ -536,11 +575,11 @@ DEFAULT_NL_PROMPT = (
 )
 
 
-def _load_llama(key):
-    """加载 GGUF 视觉模型（key 形如 'gguf:模型名'）。"""
+def _load_llama(key, n_ctx=8192):
+    """加载 GGUF 视觉模型（key 形如 'gguf:模型名'），缓存键含上下文长度。"""
     global _llama_model, _llama_key
     with _llama_lock:
-        if _llama_model is not None and _llama_key == key:
+        if _llama_model is not None and _llama_key == (key, n_ctx):
             return
         if _llama_model is not None:
             _llama_model = None
@@ -550,24 +589,24 @@ def _load_llama(key):
         if not m:
             raise ValueError(f"未知模型: {key}")
         from llama_cpp import Llama
-        print(f"[nl] loading {m['model']} ...")
+        print(f"[nl] loading {m['model']} (n_ctx={n_ctx}) ...")
         _llama_model = Llama(
             model_path=os.path.join(MODEL_DIR, m["model"]),
             mmproj_path=os.path.join(MODEL_DIR, m["mmproj"]),
             n_gpu_layers=-1,
-            n_ctx=8192,
+            n_ctx=n_ctx,
             flash_attn=True,
             verbose=False,
         )
-        _llama_key = key
+        _llama_key = (key, n_ctx)
         print("[nl] ready")
 
 
-def _nl_interrogate(key, pil_img, prompt):
-    _load_llama(key)
+def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192):
+    _load_llama(key, n_ctx)
     pil_img = pil_img.convert("RGB")
-    if max(pil_img.size) > 1536:
-        pil_img.thumbnail((1536, 1536))
+    if max(pil_img.size) > max_side:
+        pil_img.thumbnail((max_side, max_side))
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -657,7 +696,10 @@ def _run_job(cfg, model_cfg):
                         body = ", ".join([_escape_tag(c) for c in chars]
                                          + [_escape_tag(g) for g in general])
                     else:
-                        body = _nl_interrogate(model, im, cfg.get("nl_prompt", ""))
+                        body = _nl_interrogate(
+                            model, im, cfg.get("nl_prompt", ""),
+                            max_side=cfg.get("nl_res", 1536),
+                            n_ctx=cfg.get("n_ctx", 8192))
                 text = _append_prompts(prefix, suffix, body)
                 with open(txt, "w", encoding="utf-8") as f:
                     f.write(text)
@@ -711,11 +753,124 @@ def start_job(cfg):
     try:
         cfg["gen_t"] = float(cfg.get("gen_t", 0.35))
         cfg["char_t"] = float(cfg.get("char_t", 0.85))
+        cfg["n_ctx"] = int(cfg.get("n_ctx", 8192))
+        cfg["nl_res"] = int(cfg.get("nl_res", 1536))
     except (TypeError, ValueError):
-        return False, "阈值必须是数字"
+        return False, "阈值或参数必须是数字"
     _last_cfg = dict(cfg)
     threading.Thread(target=_run_job, args=(cfg, model_cfg), daemon=True).start()
     return True, "开始打标"
+
+
+# ---------------------------------------------------------------- 效果对比 ---
+
+_cmp = {"running": False, "cancel": False, "finished": False, "total": 0,
+        "done": 0, "current": "", "error": None, "results": []}
+_cmp_lock = threading.Lock()
+_cmp_img = None      # 对比用图片在服务端的临时路径
+
+
+def _run_compare(models, params):
+    """依次用每个模型对单张图片打标，结果逐个写入 _cmp['results']。
+    标签模型（onnx）先跑、自然语言模型（llama.cpp）后跑，减少显存争用。"""
+    global _cmp, _llama_model, _llama_key
+    im = None
+    model_cfg = load_config()
+    try:
+        with _cmp_lock:
+            _cmp.update(running=True, cancel=False, finished=False,
+                        total=len(models), done=0, current="", error=None,
+                        results=[])
+        im = Image.open(_cmp_img)
+        im.load()
+        ordered = ([m for m in models if m["kind"] == "tag"]
+                   + [m for m in models if m["kind"] != "tag"])
+        for m in ordered:
+            if _cmp["cancel"]:
+                break
+            with _cmp_lock:
+                _cmp["current"] = m["label"]
+            res = {"id": m["id"], "label": m["label"], "kind": m["kind"],
+                   "ok": False, "output": "", "sec": 0, "error": None}
+            t0 = time.time()
+            try:
+                if m["kind"] == "tag":
+                    if model_entry(model_cfg, m["id"]).get("engine") == "cl":
+                        chars, general = _cl_interrogate(
+                            m["id"], im, params["gen_t"], params["char_t"],
+                            model_cfg)
+                    else:
+                        chars, general = _wd14_interrogate(
+                            m["id"], im, params["gen_t"], params["char_t"],
+                            model_cfg)
+                    res["output"] = ", ".join(
+                        [_escape_tag(c) for c in chars]
+                        + [_escape_tag(g) for g in general])
+                else:
+                    res["output"] = _nl_interrogate(
+                        m["id"], im, params["nl_prompt"],
+                        max_side=params["res"], n_ctx=params["n_ctx"])
+                res["ok"] = True
+            except Exception as e:
+                traceback.print_exc()
+                res["error"] = f"{e.__class__.__name__}: {e}"
+            res["sec"] = round(time.time() - t0, 1)
+            with _cmp_lock:
+                _cmp["results"].append(res)
+                _cmp["done"] += 1
+    except Exception as e:
+        traceback.print_exc()
+        with _cmp_lock:
+            _cmp["error"] = f"{e.__class__.__name__}: {e}"
+    finally:
+        try:
+            if im is not None:
+                im.close()
+        except Exception:
+            pass
+        with _cmp_lock:
+            _cmp["running"] = False
+            _cmp["finished"] = True
+            _cmp["current"] = ""
+        # llama.cpp 模型很占显存，对比完自动释放
+        with _llama_lock:
+            if _llama_model is not None:
+                _llama_model = None
+                _llama_key = None
+                import gc
+                gc.collect()
+                print("[nl] model unloaded to free VRAM")
+
+
+def start_compare(models, params):
+    """校验并启动一次对比。models=[{id, kind}]，params 为共用参数。"""
+    cfg = load_config()
+    nl_models = scan_nl_models()
+    picked = []
+    for m in models:
+        mid, kind = m.get("id", ""), m.get("kind", "")
+        if kind == "tag":
+            e = model_entry(cfg, mid)
+            if not e or not model_installed(e):
+                return False, f"模型未下载：{mid}"
+            picked.append({"id": mid, "kind": "tag", "label": e["label"]})
+        elif kind == "nl":
+            if mid not in nl_models:
+                return False, f"未知自然语言模型：{mid}"
+            picked.append({"id": mid, "kind": "nl", "label": nl_models[mid]["label"]})
+        else:
+            return False, "未知模型类型"
+    try:
+        params = {"gen_t": float(params.get("gen_t", 0.35)),
+                  "char_t": float(params.get("char_t", 0.85)),
+                  "n_ctx": int(params.get("n_ctx", 8192)),
+                  "res": int(params.get("res", 1536)),
+                  "nl_prompt": (params.get("nl_prompt") or "").strip()
+                               or DEFAULT_NL_PROMPT}
+    except (TypeError, ValueError):
+        return False, "参数必须是数字"
+    threading.Thread(target=_run_compare, args=(picked, params), daemon=True).start()
+    return True, "开始对比"
 
 
 # ---------------------------------------------------------------- Flask ---
@@ -819,12 +974,43 @@ PAGE = r"""<!doctype html>
                   transition:background .2s; z-index:999; }
   body.dark .theme-toggle:hover { background:#38383a; }
   body.light .theme-toggle:hover { background:#e9e9eb; }
+  /* 页签与效果对比 */
+  .tabs { display:flex; gap:8px; margin-bottom:14px; }
+  .tab { background:var(--inner); color:var(--text); border:1px solid var(--input-border);
+         padding:9px 22px; font-size:14px; }
+  .tab.active { background:#0984e3; color:#fff; border-color:#0984e3; }
+  .tab.active:hover { background:#0b6fc0; }
+  .modelgrid { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 12px 120px; }
+  .mchip { display:flex; align-items:center; gap:6px; padding:6px 12px;
+           border:1px solid var(--input-border); border-radius:999px; font-size:13px;
+           cursor:pointer; background:var(--inner); user-select:none; }
+  .mchip input { margin:0; cursor:pointer; }
+  .mchip.dis { opacity:.45; }
+  .badge { font-size:11px; padding:1px 7px; border-radius:4px; color:#fff; flex-shrink:0; }
+  .badge.tag { background:#0984e3; }
+  .badge.nl { background:#8e44ad; }
+  .rcard { border:1px solid var(--border); border-radius:10px; padding:12px 14px;
+           margin-top:10px; background:var(--inner); }
+  .rcard .rhead { display:flex; align-items:center; gap:8px; margin-bottom:8px;
+                  font-size:13.5px; }
+  .rcard .rsec { opacity:.6; font-size:12px; margin-left:auto; flex-shrink:0; }
+  .rcard .rtag { font-family:Consolas,monospace; font-size:13px; line-height:1.6;
+                 word-break:break-all; }
+  .rcard .rnl { font-size:13.5px; line-height:1.7; white-space:pre-wrap; }
+  .rcard .rerr { color:#c0392b; font-size:13px; white-space:pre-wrap; }
+  body.dark .rcard .rerr { color:#ff7675; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏷️ 数据集打标</h1>
 
+  <div class="tabs">
+    <button class="tab active" id="tabBatch" onclick="switchTab('batch')">批量打标</button>
+    <button class="tab" id="tabCmp" onclick="switchTab('cmp')">效果对比</button>
+  </div>
+
+  <div id="batchView">
   <div class="card">
     <div class="row">
       <label class="lab">文件夹</label>
@@ -864,6 +1050,23 @@ PAGE = r"""<!doctype html>
         <div class="tip" style="margin:0">给视觉模型的指令，告诉它怎么描述图片（可自由修改）</div>
       </div>
       <textarea id="nl_prompt" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:10px">
+        <label class="lab">上下文长度</label>
+        <select id="n_ctx">
+          <option value="2048">2048</option>
+          <option value="4096">4096</option>
+          <option value="8192" selected>8192</option>
+          <option value="16384">16384</option>
+        </select>
+        <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
+        <select id="nl_res">
+          <option value="768">768（快）</option>
+          <option value="1024">1024（均衡）</option>
+          <option value="1536" selected>1536（高清）</option>
+          <option value="2048">2048（超清·慢）</option>
+        </select>
+      </div>
+      <div class="tip" style="margin:-4px 0 8px 120px">上下文长度与图片分辨率（长边上限）仅对自然语言打标生效</div>
     </div>
 
     <div class="row" style="margin-top:12px">
@@ -895,6 +1098,64 @@ PAGE = r"""<!doctype html>
       <div id="jobErr" class="err"></div>
     </div>
   </div>
+  </div><!-- /batchView -->
+
+  <div id="cmpView" style="display:none">
+  <div class="card">
+    <h2>⚖️ 效果对比（单张图片 · 多模型同时打标）</h2>
+
+    <div class="row">
+      <label class="lab">图片</label>
+      <input type="file" id="cmpFile" accept=".jpg,.jpeg,.png,.webp,.bmp,.gif">
+      <img id="cmpThumb" style="display:none; max-height:110px; max-width:220px;
+           border-radius:8px; border:1px solid var(--border);" alt="">
+    </div>
+
+    <div class="row">
+      <label class="lab">对比模型</label>
+      <span class="tip" style="margin:0">勾选要对比的模型，可同时选标签模型和自然语言模型（最多 8 个）</span>
+    </div>
+    <div id="cmpModels" class="modelgrid"></div>
+
+    <div class="row">
+      <label class="lab">标签阈值</label>
+      <input type="number" id="cmp_gen_t" value="0.35" min="0" max="1" step="0.05">
+      <label class="lab" style="width:90px; text-align:right">角色阈值</label>
+      <input type="number" id="cmp_char_t" value="0.85" min="0" max="1" step="0.05">
+    </div>
+    <div class="row">
+      <label class="lab">上下文长度</label>
+      <select id="cmp_n_ctx">
+        <option value="2048">2048</option>
+        <option value="4096">4096</option>
+        <option value="8192" selected>8192</option>
+        <option value="16384">16384</option>
+      </select>
+      <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
+      <select id="cmp_res">
+        <option value="768">768（快）</option>
+        <option value="1024">1024（均衡）</option>
+        <option value="1536" selected>1536（高清）</option>
+        <option value="2048">2048（超清·慢）</option>
+      </select>
+    </div>
+    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；上下文长度与图片分辨率仅对自然语言模型生效</div>
+
+    <div class="row">
+      <label class="lab">NL 提示词</label>
+      <div class="tip" style="margin:0">自然语言模型使用的指令（可自由修改）</div>
+    </div>
+    <textarea id="cmp_nl_prompt" spellcheck="false"></textarea>
+
+    <div class="row" style="margin-top:12px">
+      <button id="cmpRunBtn" onclick="runCompare()">开始对比</button>
+      <button class="plain" id="cmpCancelBtn" onclick="cancelCompare()" style="display:none">停止</button>
+      <span id="cmpInfo" class="tip"></span>
+    </div>
+
+    <div id="cmpResults"></div>
+  </div>
+  </div><!-- /cmpView -->
 </div>
 
 <!-- 模型配置窗口 -->
@@ -1232,6 +1493,8 @@ function args() {
         gen_t: parseFloat($('gen_t').value),
         char_t: parseFloat($('char_t').value),
         nl_prompt: $('nl_prompt').value,
+        n_ctx: parseInt($('n_ctx').value),
+        nl_res: parseInt($('nl_res').value),
         prefix: $('prefix').value,
         suffix: $('suffix').value,
         skip_existing: $('skip_existing').checked
@@ -1290,16 +1553,131 @@ async function pollJob() {
     } catch (e) {}
 }
 
+// ---- 页签切换：批量打标 / 效果对比 ----
+function switchTab(t) {
+    const batch = t !== 'cmp';
+    $('tabBatch').classList.toggle('active', batch);
+    $('tabCmp').classList.toggle('active', !batch);
+    $('batchView').style.display = batch ? '' : 'none';
+    $('cmpView').style.display = batch ? 'none' : '';
+    if (!batch) renderCmpModels();
+}
+
+// ---- 效果对比 ----
+function renderCmpModels() {
+    const grid = $('cmpModels');
+    grid.innerHTML = '';
+    const list = models.filter(m => m.installed);
+    if (!list.length) {
+        grid.innerHTML = '<span class="tip" style="margin-left:-120px">没有已下载的模型，请先在"批量打标"页的配置窗口下载</span>';
+        return;
+    }
+    for (const m of list) {
+        const lab = document.createElement('label');
+        lab.className = 'mchip';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.value = m.id; cb.dataset.kind = m.kind;
+        const badge = document.createElement('span');
+        badge.className = 'badge ' + m.kind;
+        badge.textContent = m.kind === 'tag' ? '标签' : 'NL';
+        lab.append(cb, badge, document.createTextNode(m.label));
+        grid.appendChild(lab);
+    }
+}
+
+$('cmpFile').onchange = () => {
+    const f = $('cmpFile').files[0];
+    const th = $('cmpThumb');
+    if (!f) { th.style.display = 'none'; return; }
+    const rd = new FileReader();
+    rd.onload = e => { th.src = e.target.result; th.style.display = ''; };
+    rd.readAsDataURL(f);
+};
+
+async function runCompare() {
+    const chips = [...document.querySelectorAll('#cmpModels input:checked')];
+    if (!chips.length) { alert('请先勾选至少一个模型'); return; }
+    if (!$('cmpFile').files.length) { alert('请先选择一张图片'); return; }
+    const fd = new FormData();
+    fd.append('file', $('cmpFile').files[0]);
+    fd.append('models', JSON.stringify(
+        chips.map(c => ({ id: c.value, kind: c.dataset.kind }))));
+    fd.append('gen_t', $('cmp_gen_t').value);
+    fd.append('char_t', $('cmp_char_t').value);
+    fd.append('n_ctx', $('cmp_n_ctx').value);
+    fd.append('res', $('cmp_res').value);
+    fd.append('nl_prompt', $('cmp_nl_prompt').value);
+    $('cmpRunBtn').disabled = true;
+    try {
+        const r = await fetch('/api/compare', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (!d.ok) { alert(d.error || d.message || '启动失败'); $('cmpRunBtn').disabled = false; }
+    } catch (e) { alert('启动失败: ' + e); $('cmpRunBtn').disabled = false; }
+}
+
+async function cancelCompare() {
+    try { await fetch('/api/compare_cancel', { method: 'POST' }); } catch (e) {}
+}
+
+function escapeHtml(s) {
+    return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function pollCmp() {
+    try {
+        const r = await fetch('/api/compare_status');
+        const s = await r.json();
+        $('cmpCancelBtn').style.display = s.running ? '' : 'none';
+        $('cmpRunBtn').disabled = s.running;
+        let info = '';
+        if (s.running) {
+            info = '<span class="spin"></span>进行中 ' + s.done + '/' + s.total;
+            if (s.current) info += ' · 当前：' + escapeHtml(s.current);
+        } else if (s.finished && !s.error && s.done === s.total && s.total > 0) {
+            info = '✔ 对比完成';
+        } else if (s.finished && s.total > 0) {
+            info = s.cancel ? '已停止' : '完成（部分失败）';
+        }
+        if (s.error) info += '　<span class="err">❌ ' + escapeHtml(s.error) + '</span>';
+        $('cmpInfo').innerHTML = info;
+        if (!s.results || !s.results.length) { $('cmpResults').innerHTML = ''; return; }
+        let html = '';
+        for (const res of s.results) {
+            const badge = '<span class="badge ' + res.kind + '">'
+                        + (res.kind === 'tag' ? '标签' : 'NL') + '</span>';
+            let body;
+            if (res.ok) {
+                body = '<div class="' + (res.kind === 'tag' ? 'rtag' : 'rnl') + '">'
+                     + escapeHtml(res.output) + '</div>';
+            } else {
+                body = '<div class="rerr">❌ ' + escapeHtml(res.error) + '</div>';
+            }
+            html += '<div class="rcard"><div class="rhead">' + badge
+                  + '<b>' + escapeHtml(res.label) + '</b>'
+                  + '<span class="rsec">' + (res.sec ? res.sec + 's' : '') + '</span></div>'
+                  + body + '</div>';
+        }
+        if (s.running && s.current && s.done < s.total) {
+            html += '<div class="rcard"><div class="rhead"><span class="spin"></span>'
+                  + escapeHtml(s.current) + ' 推理中…</div></div>';
+        }
+        $('cmpResults').innerHTML = html;
+    } catch (e) {}
+}
+
 // ---- 初始化 ----
 (async function init() {
     try {
         const r = await fetch('/api/nl_prompt');
         const j = await r.json();
         $('nl_prompt').value = j.prompt;
+        $('cmp_nl_prompt').value = j.prompt;
     } catch (e) {}
     await loadModels();
     pollJob();
     setInterval(pollJob, 1000);
+    pollCmp();
+    setInterval(pollCmp, 1200);
 })();
 </script>
 </body>
@@ -1423,6 +1801,9 @@ def api_delete_model():
     with _job_lock:
         if _job["running"]:
             return jsonify({"ok": False, "error": "打标任务进行中，无法删除"}), 409
+    with _cmp_lock:
+        if _cmp["running"]:
+            return jsonify({"ok": False, "error": "效果对比进行中，无法删除"}), 409
     d = wd14_dir(model_id)
     if not os.path.isdir(d):
         return jsonify({"ok": False, "error": "模型目录不存在"}), 404
@@ -1478,6 +1859,56 @@ def api_run():
     cfg = request.get_json(silent=True) or {}
     ok, msg = start_job(cfg)
     return jsonify({"ok": ok, "message": msg}), (200 if ok else 400)
+
+
+@app.post("/api/compare")
+def api_compare():
+    """上传单张图片 + 模型列表 + 共用参数，启动效果对比。"""
+    global _cmp_img
+    with _cmp_lock:
+        if _cmp["running"]:
+            return jsonify({"ok": False, "error": "已有对比任务在运行中"}), 409
+    with _job_lock:
+        if _job["running"]:
+            return jsonify({"ok": False, "error": "批量打标任务进行中，请先等待完成"}), 409
+    file = request.files.get("file")
+    try:
+        models = json.loads(request.form.get("models", "[]"))
+    except ValueError:
+        return jsonify({"ok": False, "error": "参数错误"}), 400
+    if not file or not isinstance(models, list) or not models:
+        return jsonify({"ok": False, "error": "请选择图片并至少勾选一个模型"}), 400
+    if len(models) > 8:
+        models = models[:8]
+    if not file.filename.lower().endswith(IMG_EXTS):
+        return jsonify({"ok": False, "error": "不支持的图片格式"}), 400
+    os.makedirs(TAGGER_DIR, exist_ok=True)
+    _cmp_img = os.path.join(TAGGER_DIR, "_compare_input"
+                            + os.path.splitext(file.filename)[1].lower())
+    file.save(_cmp_img)
+    try:
+        with Image.open(_cmp_img) as im:
+            im.verify()
+    except Exception:
+        _cmp_img = None
+        return jsonify({"ok": False, "error": "图片无法解码"}), 400
+    ok, msg = start_compare(models, request.form)
+    return jsonify({"ok": ok, "error": msg}), (200 if ok else 400)
+
+
+@app.get("/api/compare_status")
+def api_compare_status():
+    with _cmp_lock:
+        return jsonify(dict(_cmp))
+
+
+@app.post("/api/compare_cancel")
+def api_compare_cancel():
+    with _cmp_lock:
+        if _cmp["running"]:
+            _cmp["cancel"] = True
+            return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "没有正在运行的对比"})
 
 
 @app.get("/api/job")
