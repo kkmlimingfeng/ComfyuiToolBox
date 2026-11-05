@@ -714,11 +714,14 @@ PAGE = r"""<!doctype html>
   .video-file-info span { display:block; overflow-wrap:anywhere; color:var(--muted); font-size:13px; text-align:center; }
   .video-actions { margin-top:12px; }
   .video-settings-table { display:grid; grid-template-columns:repeat(5, minmax(0, 1fr));
-                          gap:14px 16px; margin-top:14px; padding:4px 0; }
-  .video-setting { display:flex; flex-direction:column; align-items:stretch; gap:6px;
-                   min-width:0; color:var(--muted); font-size:13px; }
-  .video-setting-title { display:flex; align-items:flex-start; justify-content:space-between;
-                         gap:4px; min-height:38px; line-height:1.35; }
+                          gap:14px 16px; margin-top:14px; padding:4px 0;
+                          align-items:center; justify-items:center; }
+  .video-settings-table.cols-3 { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+  .video-setting { display:flex; flex-direction:column; align-items:center; justify-content:center;
+                   gap:6px; min-width:0; width:100%; color:var(--muted); font-size:13px;
+                   text-align:center; }
+  .video-setting-title { display:flex; align-items:center; justify-content:center;
+                         gap:4px; line-height:1.35; }
   .segment-toggle { display:flex; align-items:center; gap:5px; white-space:nowrap; }
   .segment-setting.is-disabled .video-setting-title,
   .segment-setting.is-disabled .video-stepper span { color:var(--muted); opacity:.55; }
@@ -726,6 +729,8 @@ PAGE = r"""<!doctype html>
   .video-setting .segment-toggle input { width:auto; height:auto; }
   .video-stepper { display:flex; align-items:center; gap:8px; }
   .video-stepper input { max-width:110px; }
+  .video-stepper input::-webkit-outer-spin-button,
+  .video-stepper input::-webkit-inner-spin-button { opacity:1; -webkit-appearance:inner-spin-button; }
   .video-stepper span { color:var(--muted); white-space:nowrap; }
   #videoFrameEstimate { margin-top:8px; color:var(--muted); font-size:12px; }
   #videoResult { display:none; }
@@ -742,6 +747,7 @@ PAGE = r"""<!doctype html>
   @media (max-width:620px) {
     body { padding:16px; }
     .video-settings-table { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+    .video-settings-table.cols-3 { grid-template-columns:repeat(1, minmax(0, 1fr)); }
   }
   #badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px;
            background:var(--btn); color:var(--muted); margin-left:8px; }
@@ -888,20 +894,16 @@ PAGE = r"""<!doctype html>
     <button class="primary" id="pickFiles">选择图片（可多选）</button>
     <button id="pickDir">选择文件夹</button>
     <button id="clear">清空列表</button>
-    <span style="align-self:center;font-size:13px;color:var(--muted);">提示词语言：
-      <select id="langSel" class="sel">
-        <option value="zh" selected>中文</option>
-        <option value="en">English</option>
-      </select>
-    </span>
-    <span style="align-self:center;font-size:13px;color:var(--muted);">图像分辨率：
+  </div>
+  <div class="video-settings-table cols-3" role="group" aria-label="图片反推参数">
+    <label class="video-setting"><span class="video-setting-title">最长边分辨率</span>
       <select id="resSel" class="sel">
         <option value="768">768（快速）</option>
         <option value="1024">1024（均衡）</option>
         <option value="1536" selected>1536（高清）</option>
       </select>
-    </span>
-    <span style="align-self:center;font-size:13px;color:var(--muted);">最大输出长度：
+    </label>
+    <label class="video-setting"><span class="video-setting-title">最大输出长度</span>
       <select id="maxtSel" class="sel">
         <option value="512">512</option>
         <option value="768">768</option>
@@ -909,7 +911,13 @@ PAGE = r"""<!doctype html>
         <option value="1536">1536</option>
         <option value="2048">2048</option>
       </select>
-    </span>
+    </label>
+    <label class="video-setting"><span class="video-setting-title">提示词语言</span>
+      <select id="langSel" class="sel">
+        <option value="zh" selected>中文</option>
+        <option value="en">English</option>
+      </select>
+    </label>
   </div>
   <input type="file" id="fileInput" multiple accept="image/*" hidden>
   <input type="file" id="dirInput" webkitdirectory multiple hidden>
@@ -946,13 +954,12 @@ PAGE = r"""<!doctype html>
       <div class="video-setting segment-setting" id="segmentSetting">
         <div class="video-setting-title">
           <label class="segment-toggle" for="segmentEnabled">
-            <input type="checkbox" id="segmentEnabled"><span>分段反推</span>
+            <input type="checkbox" id="segmentEnabled"><span>分段反推 (省显存)</span>
           </label>
-          <label class="video-setting-label" for="framesPerSegment">每段帧数</label>
         </div>
         <span class="video-stepper">
           <input type="number" id="framesPerSegment" class="sel" min="1" max="60" step="1" value="8">
-          <span>帧</span>
+          <span>帧/段</span>
         </span>
       </div>
       <label class="video-setting"><span class="video-setting-title">采样帧率（每秒帧数）</span>
@@ -961,7 +968,7 @@ PAGE = r"""<!doctype html>
           <span>FPS</span>
         </span>
       </label>
-      <label class="video-setting"><span class="video-setting-title">帧分辨率（长边，Lanczos）</span>
+      <label class="video-setting"><span class="video-setting-title">最长边分辨率</span>
         <select id="videoRes" class="sel">
           <option value="512">512</option><option value="768" selected>768</option>
           <option value="1024">1024</option><option value="1536">1536</option>
