@@ -948,7 +948,8 @@ def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192,
 # ---------------------------------------------------------------- 打标任务 ---
 
 _job = {"running": False, "cancel": False, "finished": False, "total": 0,
-        "done": 0, "failed": 0, "current": "", "error": None, "errors": []}
+        "done": 0, "failed": 0, "current": "", "error": None, "errors": [],
+        "tag_freq": {}, "tag_total": 0}
 _job_lock = threading.Lock()
 
 
@@ -976,6 +977,8 @@ def _run_job(cfg, model_cfg):
     model = cfg["model"]
     prefix, suffix = cfg.get("prefix", ""), cfg.get("suffix", "")
     skip = cfg.get("skip_existing", False)
+    spaces = bool(cfg.get("spaces", False)) and mode == "tag"
+    freq = {}   # 标签出现次数（标签打标模式统计）
 
     try:
         imgs = list_images(folder)
@@ -983,7 +986,8 @@ def _run_job(cfg, model_cfg):
             raise ValueError("文件夹里没有找到可打标的图片")
         with _job_lock:
             _job.update(running=True, cancel=False, finished=False, total=len(imgs),
-                        done=0, failed=0, current="", error=None, errors=[])
+                        done=0, failed=0, current="", error=None, errors=[],
+                        tag_freq={}, tag_total=0)
 
         if mode == "tag":
             # 提前加载，失败立刻报错
@@ -1000,6 +1004,16 @@ def _run_job(cfg, model_cfg):
                 _job["current"] = name
             txt = os.path.splitext(path)[0] + ".txt"
             if skip and os.path.isfile(txt):
+                # 跳过的图片也计入标签统计（从已有 txt 读取）
+                if mode == "tag":
+                    try:
+                        with open(txt, "r", encoding="utf-8") as f:
+                            for t in f.read().split(","):
+                                t = t.replace("\\(", "(").replace("\\)", ")").strip()
+                                if t:
+                                    freq[t] = freq.get(t, 0) + 1
+                    except Exception:
+                        pass
                 with _job_lock:
                     _job["done"] += 1
                 continue
@@ -1013,8 +1027,12 @@ def _run_job(cfg, model_cfg):
                         else:
                             chars, general = _wd14_interrogate(
                                 model, im, cfg["gen_t"], cfg["char_t"], model_cfg)
-                        body = ", ".join([_escape_tag(t) for t, _ in chars]
-                                         + [_escape_tag(t) for t, _ in general])
+                        raw = [t for t, _ in chars] + [t for t, _ in general]
+                        if spaces:
+                            raw = [t.replace("_", " ") for t in raw]
+                        body = ", ".join([_escape_tag(t) for t in raw])
+                        for t in raw:
+                            freq[t] = freq.get(t, 0) + 1
                     else:
                         body = _nl_interrogate(
                             model, im, cfg.get("nl_prompt", ""),
@@ -1044,6 +1062,9 @@ def _run_job(cfg, model_cfg):
             _job["running"] = False
             _job["finished"] = True
             _job["current"] = ""
+            if mode == "tag":
+                _job["tag_freq"] = freq
+                _job["tag_total"] = sum(freq.values())
         # 模型很占显存，跑完立刻全部释放（NL + 标签模型）
         _unload_llama_now()
         _unload_taggers()
@@ -1075,6 +1096,7 @@ def start_job(cfg):
         cfg["n_ctx"] = int(cfg.get("n_ctx", 8192))
         cfg["nl_res"] = int(cfg.get("nl_res", 1536))
         cfg["maxt"] = min(4096, max(32, int(cfg.get("maxt", 512))))
+        cfg["spaces"] = bool(cfg.get("spaces", False))
     except (TypeError, ValueError):
         return False, "阈值或参数必须是数字"
     _last_cfg = dict(cfg)
@@ -1354,6 +1376,17 @@ PAGE = r"""<!doctype html>
           vertical-align:-2px; margin-right:6px; }
   @keyframes r { to { transform:rotate(360deg); } }
   #jobbox { margin-top:10px; }
+  #tagStat { margin-top:14px; border-top:1px solid var(--border); padding-top:12px; }
+  .tagstat-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;
+                  font-size:14px; font-weight:600; }
+  #tagStatFilter { width:100%; max-width:360px; padding:8px 10px; border-radius:8px;
+                   border:1px solid var(--input-border); background:var(--input-bg);
+                   color:var(--text); font-size:13px; margin-bottom:10px; }
+  .tagbar { display:flex; flex-wrap:wrap; gap:6px; max-height:340px; overflow-y:auto; padding:2px; }
+  .tagbar .tg { padding:3px 10px; border-radius:12px; background:var(--inner);
+                border:1px solid var(--border); font-size:12.5px; }
+  .tagbar .tg b { color:#0984e3; margin-left:4px; font-weight:600; }
+  .tagbar .tg .zh { color:#00b894; margin-left:5px; font-style:normal; }
   #bar, #cfgbar { height:10px; background:var(--inner); border-radius:999px; overflow:hidden;
          border:1px solid var(--border); }
   #barfill, #cfgbarfill { height:100%; width:0%; background:#27ae60; transition:width .3s; }
@@ -1499,6 +1532,9 @@ PAGE = r"""<!doctype html>
       <label style="font-size:13px; display:flex; align-items:center; gap:6px;">
         <input type="checkbox" id="skip_existing"> 已有同名 txt 时跳过
       </label>
+      <label id="spacesLabel" style="font-size:13px; display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="spaces_opt"> 空格代替下划线
+      </label>
       <button class="plain" onclick="preview()">扫描</button>
       <button id="runBtn" onclick="run()">开始打标</button>
       <button class="plain" id="cancelBtn" onclick="cancel()" style="display:none">停止</button>
@@ -1512,6 +1548,18 @@ PAGE = r"""<!doctype html>
       <div id="bar"><div id="barfill"></div></div>
       <div id="jobText" class="tip" style="margin-top:8px"></div>
       <div id="jobErr" class="err"></div>
+    </div>
+
+    <div id="tagStat" style="display:none">
+      <div class="tagstat-head">📊 标签统计
+        <span id="tagStatSummary" class="tip" style="margin:0;font-weight:normal"></span>
+        <span style="flex:1"></span>
+        <select id="ts_lang" style="padding:5px 8px;font-size:12.5px"></select>
+        <button class="plain" id="tsTrBtn" onclick="translateTagStat()"
+                style="padding:5px 14px;font-size:12.5px">🌐 翻译</button>
+      </div>
+      <input id="tagStatFilter" placeholder="筛选标签…" oninput="filterTagStat(this.value)">
+      <div class="tagbar" id="tagCloud"></div>
     </div>
   </div>
   </div><!-- /batchView -->
@@ -1686,6 +1734,7 @@ $('mode').onchange = () => {
     const nl = $('mode').value === 'nl';
     $('threshRow').style.display = nl ? 'none' : '';
     $('nlRow').style.display = nl ? '' : 'none';
+    $('spacesLabel').style.display = nl ? 'none' : '';
     renderModels();
 };
 
@@ -1992,7 +2041,8 @@ function args() {
         maxt: parseInt($('maxt').value) || 512,
         prefix: $('prefix').value,
         suffix: $('suffix').value,
-        skip_existing: $('skip_existing').checked
+        skip_existing: $('skip_existing').checked,
+        spaces: $('spaces_opt').checked
     };
 }
 
@@ -2045,7 +2095,72 @@ async function pollJob() {
         $('jobText').innerHTML = txt;
         $('jobErr').textContent = (j.error ? ('❌ ' + j.error + '\n') : '')
                                 + (j.errors && j.errors.length ? j.errors.slice(-8).join('\n') : '');
+        renderTagStat(j);
     } catch (e) {}
+}
+
+// ---- 标签统计展示（打标完成后，参照 Lora参数分析 的标签云）----
+function renderTagStat(j) {
+    const box = $('tagStat');
+    const freq = (j.finished && !j.running && Array.isArray(j.tag_freq)) ? j.tag_freq : [];
+    if (!freq.length) { box.style.display = 'none'; return; }
+    box.style.display = '';
+    $('tagStatSummary').textContent = freq.length + ' 个标签 / 共出现 ' + (j.tag_total || 0) + ' 次';
+    $('tagCloud').innerHTML = freq.map(([t, n]) =>
+        '<span class="tg" data-t="' + escapeHtml(t) + '">' + escapeHtml(t)
+        + '<b>×' + n + '</b></span>').join('');
+    $('tagStatFilter').value = '';
+}
+function filterTagStat(q) {
+    q = q.toLowerCase();
+    document.querySelectorAll('#tagCloud .tg').forEach(el => {
+        el.style.display = el.dataset.t.toLowerCase().includes(q) ? '' : 'none';
+    });
+}
+let _tsOn = false, _tsBusy = false;
+async function translateTagStat() {
+    const cloud = $('tagCloud');
+    if (!cloud || _tsBusy) return;
+    if (_tsOn) {   // 关闭翻译：只移除译文
+        _tsOn = false;
+        cloud.querySelectorAll('.zh').forEach(el => el.remove());
+        $('tsTrBtn').textContent = '🌐 翻译';
+        return;
+    }
+    const tags = [...new Set([...cloud.querySelectorAll('.tg')]
+        .filter(el => !el.querySelector('.zh')).map(el => el.dataset.t))];
+    if (!tags.length) return;
+    _tsBusy = true;
+    $('tsTrBtn').disabled = true;
+    $('tsTrBtn').textContent = '⏳ 翻译中…';
+    try {
+        const r = await fetch('/api/translate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ texts: tags, lang: $('ts_lang').value }) });
+        const d = await r.json();
+        if (d && d.ok && d.translations) {
+            const map = new Map(tags.map((t, i) => [t, d.translations[i]]));
+            cloud.querySelectorAll('.tg').forEach(el => {
+                const zh = map.get(el.dataset.t);
+                if (zh && !el.querySelector('.zh')) {
+                    const z = document.createElement('i');
+                    z.className = 'zh';
+                    z.textContent = zh;
+                    el.appendChild(z);
+                }
+            });
+            _tsOn = true;
+            $('tsTrBtn').textContent = '🌐 关闭翻译';
+        } else {
+            alert('翻译失败：' + ((d && d.error) || '服务异常'));
+        }
+    } catch (e) {
+        alert('请求失败：' + e.message);
+    } finally {
+        _tsBusy = false;
+        $('tsTrBtn').disabled = false;
+        if (!_tsOn) $('tsTrBtn').textContent = '🌐 翻译';
+    }
 }
 
 // ---- 页签切换：批量打标 / 效果对比 ----
@@ -2153,6 +2268,9 @@ for (const [lab, val] of TR_LANGS) {
     const o = document.createElement('option');
     o.value = val; o.textContent = lab;
     $('tr_lang').appendChild(o);
+    const o2 = document.createElement('option');
+    o2.value = val; o2.textContent = lab;
+    $('ts_lang').appendChild(o2);
 }
 
 // 翻译文字样式（颜色/字号）：即时生效并永久保存
@@ -2609,6 +2727,9 @@ def api_job():
     with _job_lock:
         j = dict(_job)
     j["mode"] = _last_cfg.get("mode", "")
+    freq = j.pop("tag_freq", None) or {}
+    j["tag_freq"] = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
+    j["tag_total"] = sum(freq.values())
     return jsonify(j)
 
 
