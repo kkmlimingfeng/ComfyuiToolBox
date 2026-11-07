@@ -1474,7 +1474,7 @@ PAGE = r"""<!doctype html>
     </div>
     <div class="row" id="checkRow" style="display:none">
       <label class="lab"></label>
-      <span id="checkInfo"></span>
+      <div id="checkInfo" style="flex:1"></div>
     </div>
 
     <div class="row">
@@ -1777,6 +1777,11 @@ async function checkFolder() {
         if (!d.ok) { info.innerHTML = '<span class="err">❌ ' + d.error + '</span>'; return; }
         let html = '<span class="ok">✔ 检验通过 ' + d.count + ' 张</span>';
         if (d.skipped > 0) html += '　<span class="err">✘ 跳过 ' + d.skipped + ' 张（无法解码）</span>';
+        if (d.bad && d.bad.length) {
+            html += '<div class="err" style="margin-top:6px;max-height:160px;overflow-y:auto;'
+                  + 'font-size:12px;line-height:1.7;word-break:break-all">'
+                  + d.bad.map(p => escapeHtml(p)).join('<br>') + '</div>';
+        }
         info.innerHTML = html;
     } catch (e) { info.innerHTML = '<span class="err">❌ ' + e + '</span>'; }
 }
@@ -2060,6 +2065,9 @@ async function preview() {
 async function run() {
     const btn = $('runBtn');
     btn.disabled = true;
+    _tsRendered = false; _tsOn = false;
+    $('tagStat').style.display = 'none';
+    $('tsTrBtn').textContent = '🌐 翻译';
     try {
         const r = await fetch('/api/run', { method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -2100,11 +2108,14 @@ async function pollJob() {
 }
 
 // ---- 标签统计展示（打标完成后，参照 Lora参数分析 的标签云）----
+let _tsRendered = false;   // 只渲染一次，避免轮询重绘把译文刷掉
 function renderTagStat(j) {
     const box = $('tagStat');
     const freq = (j.finished && !j.running && Array.isArray(j.tag_freq)) ? j.tag_freq : [];
-    if (!freq.length) { box.style.display = 'none'; return; }
+    if (!freq.length) { box.style.display = 'none'; _tsRendered = false; return; }
     box.style.display = '';
+    if (_tsRendered) return;
+    _tsRendered = true;
     $('tagStatSummary').textContent = freq.length + ' 个标签 / 共出现 ' + (j.tag_total || 0) + ' 次';
     $('tagCloud').innerHTML = freq.map(([t, n]) =>
         '<span class="tg" data-t="' + escapeHtml(t) + '">' + escapeHtml(t)
@@ -2654,6 +2665,7 @@ def api_check():
     if not os.path.isdir(folder):
         return jsonify({"ok": False, "error": "文件夹不存在"})
     passed, skipped = 0, 0
+    bad = []
     for path in list_images(folder):
         try:
             with Image.open(path) as im:
@@ -2662,7 +2674,8 @@ def api_check():
             passed += 1
         except Exception:
             skipped += 1
-    return jsonify({"ok": True, "count": passed, "skipped": skipped})
+            bad.append(path)
+    return jsonify({"ok": True, "count": passed, "skipped": skipped, "bad": bad})
 
 
 @app.post("/api/run")
