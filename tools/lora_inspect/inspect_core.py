@@ -637,6 +637,12 @@ def inspect_one(path):
     info["max_train_steps"] = to_int(safe_get(meta, "ss_max_train_steps"))
     info["final_step"] = to_int(safe_get(meta, "ss_steps"))
     info["final_epoch"] = to_int(safe_get(meta, "ss_epoch"))
+    # ai-toolkit 不写 ss_steps / ss_epoch，实际步数与 epoch 在 training_info 里
+    ti = info.get("trainer_info") or {}
+    if info["final_step"] is None:
+        info["final_step"] = to_int(ti.get("step"))
+    if info["final_epoch"] is None:
+        info["final_epoch"] = to_int(ti.get("epoch"))
 
     started = to_float(safe_get(meta, "ss_training_started_at"))
     finished = to_float(safe_get(meta, "ss_training_finished_at"))

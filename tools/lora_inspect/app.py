@@ -534,7 +534,8 @@ function render(i) {
     html += '<div class="sec"><h3>模型</h3>' + kv([
         ['训练引擎', i.trainer], ['trainer_info', i.trainer_info && Object.keys(i.trainer_info).length ? JSON.stringify(i.trainer_info) : null],
         ['底模家族', i.base_model],
-        ['基础架构', i.architecture || (i.is_sdxl ? 'SDXL' : (String(i.is_v2).toLowerCase() === 'true' ? 'SD v2' : 'SD 1.5 (?)'))],
+        ['基础架构', i.architecture || i.base_model
+                    || (i.is_sdxl ? 'SDXL' : (String(i.is_v2).toLowerCase() === 'true' ? 'SD v2' : 'SD 1.5 (?)'))],
         ['底模', i.base_model_name], ['底模版本', i.base_model_version], ['底模 hash', i.sd_model_hash]
     ]) + '</div>';
 
@@ -591,8 +592,10 @@ function render(i) {
     }
 
     html += '<div class="sec"><h3>训练参数</h3>' + kv([
-        ['步数', i.final_step !== null ? i.final_step + ' / max ' + fmt(i.max_train_steps) : null],
-        ['epoch', i.final_epoch !== null ? i.final_epoch + ' / ' + fmt(i.num_epochs) : null],
+        ['步数', i.final_step !== null ? (i.max_train_steps !== null && i.max_train_steps !== undefined
+                    ? i.final_step + ' / max ' + fmt(i.max_train_steps) : String(i.final_step)) : null],
+        ['epoch', i.final_epoch !== null ? (i.num_epochs !== null && i.num_epochs !== undefined
+                    ? i.final_epoch + ' / ' + fmt(i.num_epochs) : String(i.final_epoch)) : null],
         ['训练图片', i.num_train_images], ['正则图片', i.num_reg_images],
         ['batch', (i.batch_size_per_device ?? '') !== '' ? '每卡 ' + i.batch_size_per_device + ' / 总 ' + fmt(i.total_batch_size) : null],
         ['每epoch的batch数', i.num_batches_per_epoch !== null && i.num_batches_per_epoch !== undefined && i.grad_accum > 1 ? i.num_batches_per_epoch + '（micro；每epoch优化器步数≈' + Math.ceil(i.num_batches_per_epoch / i.grad_accum) + '）' : i.num_batches_per_epoch],
