@@ -3,8 +3,9 @@
 数据集打标工具（单文件版）
 - 选择文件夹，批量给 jpg/jpeg/png/webp/bmp/gif 图片打标，结果写入同名 .txt
 - 检查按钮：校验图片能否正常解码，绿色显示通过数量、红色显示跳过数量
-- 标签打标：WD14 系列 ONNX 模型（onnxruntime，优先 GPU，失败自动回退 CPU），
-  可分别设置标签阈值 / 角色阈值
+- 标签打标：WD14 / CL 系列 ONNX 模型（onnxruntime，优先 GPU，失败自动回退 CPU），
+  角色模型与标签模型可分别选择，各自设角色阈值 / 标签阈值；选同一个模型则一次
+  推理同时出角色和普通标签，不同则先角色后标签分别推理再拼接
 - 自然语言打标：复用 model/ 目录下的 GGUF 视觉模型（llama.cpp，自动 GPU offload），
   提示词可编辑
 - 附加提示词：前缀追加 / 后缀追加（英文逗号分隔多个）
@@ -970,11 +971,27 @@ def _append_prompts(prefix, suffix, body):
     return ", ".join(parts)
 
 
+def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg):
+    """按引擎分发标签推理（WD14 / CL），返回 (角色标签, 普通标签)。"""
+    if model_entry(model_cfg, model_id).get("engine") == "cl":
+        return _cl_interrogate(model_id, im, gen_t, char_t, model_cfg)
+    return _wd14_interrogate(model_id, im, gen_t, char_t, model_cfg)
+
+
+def _load_tagger(model_id, model_cfg):
+    """按引擎分发模型加载。"""
+    if model_entry(model_cfg, model_id).get("engine") == "cl":
+        _load_cl(model_id, model_cfg)
+    else:
+        _load_wd14(model_id, model_cfg)
+
+
 def _run_job(cfg, model_cfg):
     global _job
     folder = cfg["folder"]
     mode = cfg["mode"]
     model = cfg["model"]
+    char_model = cfg.get("char_model") or model   # 角色模型；与标签模型相同则单次推理
     prefix, suffix = cfg.get("prefix", ""), cfg.get("suffix", "")
     skip = cfg.get("skip_existing", False)
     spaces = bool(cfg.get("spaces", False)) and mode == "tag"
@@ -990,11 +1007,9 @@ def _run_job(cfg, model_cfg):
                         tag_freq={}, tag_total=0)
 
         if mode == "tag":
-            # 提前加载，失败立刻报错
-            if model_entry(model_cfg, model).get("engine") == "cl":
-                _load_cl(model, model_cfg)
-            else:
-                _load_wd14(model, model_cfg)
+            # 提前加载（角色模型与标签模型可能不同，两个都加载），失败立刻报错
+            for mid in dict.fromkeys([char_model, model]):
+                _load_tagger(mid, model_cfg)
 
         for path in imgs:
             if _job["cancel"]:
@@ -1021,12 +1036,16 @@ def _run_job(cfg, model_cfg):
                 with Image.open(path) as im:
                     im.load()
                     if mode == "tag":
-                        if model_entry(model_cfg, model).get("engine") == "cl":
-                            chars, general = _cl_interrogate(
+                        if char_model == model:
+                            chars, general = _tag_interrogate(
                                 model, im, cfg["gen_t"], cfg["char_t"], model_cfg)
                         else:
-                            chars, general = _wd14_interrogate(
-                                model, im, cfg["gen_t"], cfg["char_t"], model_cfg)
+                            # 不同模型：角色模型只取角色（阈值 1.1 屏蔽普通标签），
+                            # 标签模型只取普通标签，再拼接
+                            chars, _ = _tag_interrogate(
+                                char_model, im, 1.1, cfg["char_t"], model_cfg)
+                            _, general = _tag_interrogate(
+                                model, im, cfg["gen_t"], 1.1, model_cfg)
                         raw = [t for t, _ in chars] + [t for t, _ in general]
                         if spaces:
                             raw = [t.replace("_", " ") for t in raw]
@@ -1082,11 +1101,14 @@ def start_job(cfg):
     mode = cfg.get("mode", "tag")
     model = cfg.get("model", "")
     if mode == "tag":
-        m = model_entry(model_cfg, model)
-        if not m:
-            return False, "未知标签模型"
-        if not model_installed(m):
-            return False, "模型未下载，请先在配置窗口下载"
+        char_model = cfg.get("char_model", "") or model
+        for mid, what in ((char_model, "角色模型"), (model, "标签模型")):
+            m = model_entry(model_cfg, mid)
+            if not m:
+                return False, f"未知{what}"
+            if not model_installed(m):
+                return False, f"{what}未下载，请先在配置窗口下载"
+        cfg["char_model"] = char_model
     else:
         if model not in scan_nl_models():
             return False, "未知自然语言模型（GGUF 未找到）"
@@ -1485,16 +1507,18 @@ PAGE = r"""<!doctype html>
       </select>
     </div>
 
-    <div class="row">
-      <label class="lab">模型</label>
-      <select id="model"></select>
-    </div>
-
-    <div class="row" id="threshRow">
-      <label class="lab">标签阈值</label>
-      <input type="number" id="gen_t" value="0.35" min="0" max="1" step="0.05">
+    <div class="row" id="charRow">
+      <label class="lab">角色模型</label>
+      <select id="char_model"></select>
       <label class="lab" style="width:90px; text-align:right">角色阈值</label>
       <input type="number" id="char_t" value="0.85" min="0" max="1" step="0.05">
+    </div>
+
+    <div class="row" id="tagRow">
+      <label class="lab">标签模型</label>
+      <select id="model"></select>
+      <label class="lab" style="width:90px; text-align:right">标签阈值</label>
+      <input type="number" id="gen_t" value="0.35" min="0" max="1" step="0.05">
     </div>
 
     <div id="nlRow" style="display:none">
@@ -1541,8 +1565,9 @@ PAGE = r"""<!doctype html>
       <span id="scanInfo" class="tip"></span>
     </div>
 
-    <div class="tip">结果写入图片同名的 .txt 文件（UTF-8）。标签打标输出"角色标签在前、普通标签在后"，
-    括号会被转义；评分（rating）标签不写入。</div>
+    <div class="tip">结果写入图片同名的 .txt 文件（UTF-8）。角色模型与标签模型相同则一次推理同时出角色和普通标签；
+    不同则先用角色模型识别角色（角色阈值）、再用标签模型识别普通标签（标签阈值）后拼接。
+    输出"角色标签在前、普通标签在后"，括号会被转义；评分（rating）标签不写入。</div>
 
     <div id="jobbox" style="display:none">
       <div id="bar"><div id="barfill"></div></div>
@@ -1701,21 +1726,23 @@ let models = [];   // {id, label, kind, size, installed, visible, custom}
 
 function renderModels() {
     const mode = $('mode').value;
-    const sel = $('model');
-    sel.innerHTML = '';
     const list = models.filter(m => m.kind === mode && m.visible);
-    for (const m of list) {
-        const o = document.createElement('option');
-        o.value = m.id;
-        o.textContent = m.label + (m.installed ? '' : '（未下载）');
-        o.disabled = !m.installed;
-        sel.appendChild(o);
-    }
-    // 默认选中第一个可用的；正在使用的模型仍在列表中则保持选中
-    const cur = list.find(m => m.id === sel.value && m.installed);
-    if (!cur) {
-        const firstOk = list.find(m => m.installed);
-        if (firstOk) sel.value = firstOk.id;
+    // 角色模型与标签模型用同一份清单（两个下拉独立选择）
+    for (const sel of [$('model'), $('char_model')]) {
+        sel.innerHTML = '';
+        for (const m of list) {
+            const o = document.createElement('option');
+            o.value = m.id;
+            o.textContent = m.label + (m.installed ? '' : '（未下载）');
+            o.disabled = !m.installed;
+            sel.appendChild(o);
+        }
+        // 默认选中第一个可用的；正在使用的模型仍在列表中则保持选中
+        const cur = list.find(m => m.id === sel.value && m.installed);
+        if (!cur) {
+            const firstOk = list.find(m => m.installed);
+            if (firstOk) sel.value = firstOk.id;
+        }
     }
 }
 
@@ -1732,7 +1759,8 @@ async function loadModels() {
 
 $('mode').onchange = () => {
     const nl = $('mode').value === 'nl';
-    $('threshRow').style.display = nl ? 'none' : '';
+    $('charRow').style.display = nl ? 'none' : '';
+    $('tagRow').style.display = nl ? 'none' : '';
     $('nlRow').style.display = nl ? '' : 'none';
     $('spacesLabel').style.display = nl ? 'none' : '';
     renderModels();
@@ -1752,11 +1780,22 @@ function applyDefThr() {
     const m = models.find(x => x.id === $('model').value);
     if (m && m.kind === 'tag' && m.def_gen != null) {
         $('gen_t').value = m.def_gen;
-        $('char_t').value = m.def_char;
+        // 角色模型没被单独改过时跟随标签模型（保持"同一个模型"），角色阈值一并填入
+        if (!_charModelTouched) {
+            $('char_model').value = m.id;
+            $('char_t').value = m.def_char;
+        }
     }
     maybeAutoPrompt(m, $('nl_prompt'));
 }
 $('model').onchange = applyDefThr;
+// 手动改角色模型：填入该模型的角色阈值，之后不再跟随标签模型
+let _charModelTouched = false;
+$('char_model').onchange = () => {
+    _charModelTouched = true;
+    const m = models.find(x => x.id === $('char_model').value);
+    if (m && m.def_char != null) $('char_t').value = m.def_char;
+};
 
 // ---- 文件夹：浏览 / 检查 ----
 async function pickFolder() {
@@ -2039,6 +2078,7 @@ function args() {
         folder: $('folder').value.trim(),
         mode: $('mode').value,
         model: $('model').value,
+        char_model: $('char_model').value,
         gen_t: parseFloat($('gen_t').value),
         char_t: parseFloat($('char_t').value),
         nl_prompt: $('nl_prompt').value,
