@@ -1067,16 +1067,25 @@ def _append_prompts(prefix, suffix, body):
 
 
 def _order_caption(chars, cpr, general):
-    """打标 caption 主体固定顺序（组内保持模型输出的置信度顺序）：
+    """caption 固定顺序（规则优先级高于置信度排序）：
     角色 → 作品(copyright) → 含 girl 标签 → solo → 含 look 标签 → 其余标签。
-    前缀/后缀由 _append_prompts 另行拼接。"""
-    low = [t.lower() for t in general]
-    girls = [t for t, l in zip(general, low) if "girl" in l]
-    solo = [t for t, l in zip(general, low) if l == "solo"]
-    looks = [t for t, l in zip(general, low) if "look" in l and l != "solo"]
-    rest = [t for t, l in zip(general, low)
-            if "girl" not in l and l != "solo" and "look" not in l]
-    return chars + cpr + girls + solo + looks + rest
+    组内保持模型输出的置信度顺序；元素支持纯标签字符串或 (标签, 置信度) 元组。
+    前缀/后缀由 _append_prompts 另行拼接。批量打标与效果对比页共用。"""
+    def _name(it):
+        return (it[0] if isinstance(it, tuple) else it).lower()
+
+    girls, solo, looks, rest = [], [], [], []
+    for it in general:
+        l = _name(it)
+        if "girl" in l:
+            girls.append(it)
+        elif l == "solo":
+            solo.append(it)
+        elif "look" in l:
+            looks.append(it)
+        else:
+            rest.append(it)
+    return list(chars) + list(cpr) + girls + solo + looks + rest
 
 
 def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg):
@@ -1280,7 +1289,7 @@ def _run_compare(models, params):
                     chars, cpr, general = _tag_interrogate(
                         m["id"], im, params["gen_t"], params["char_t"],
                         model_cfg)
-                    items = chars + cpr + general   # 对比页保持角色/版权/普通的原始顺序
+                    items = _order_caption(chars, cpr, general)  # 与批量打标相同的固定顺序
                     res["output"] = ", ".join(
                         [_escape_tag(t) for t, _ in items])
                     # 附带置信度（3 位小数），对比页在每个标签旁展示
