@@ -3,9 +3,10 @@
 数据集打标工具（单文件版）
 - 选择文件夹，批量给 jpg/jpeg/png/webp/bmp/gif 图片打标，结果写入同名 .txt
 - 检查按钮：校验图片能否正常解码，绿色显示通过数量、红色显示跳过数量
-- 标签打标：WD14 / CL 系列 ONNX 模型（onnxruntime，优先 GPU，失败自动回退 CPU），
-  角色模型与标签模型可分别选择，各自设角色阈值 / 标签阈值；选同一个模型则一次
-  推理同时出角色和普通标签，不同则先角色后标签分别推理再拼接
+- 标签打标：WD14 / CL 系列 ONNX 模型（onnxruntime，优先 GPU，失败自动回退 CPU）
+  与 PixAI Tagger 系列 PyTorch 模型（transformers + trust_remote_code，6 类标签
+  分别阈值），角色模型与标签模型可分别选择，各自设角色阈值 / 标签阈值；选同一个
+  模型则一次推理同时出角色和普通标签，不同则先角色后标签分别推理再拼接
 - 自然语言打标：复用 model/ 目录下的 GGUF 视觉模型（llama.cpp，自动 GPU offload），
   提示词可编辑
 - 附加提示词：前缀追加 / 后缀追加（英文逗号分隔多个）
@@ -110,6 +111,19 @@ CL_MODELS = [
 
 CL_DEFAULT_PROCESSOR = "google/siglip2-so400m-patch16-naflex"
 
+# 内置标签打标模型：PixAI Tagger（transformers PyTorch，trust_remote_code 自定义代码）。
+# 30877 个标签按 tags_split 分 6 类，各类有官方推荐阈值；推理走 AutoModel + AutoImageProcessor
+# （依赖 torch / torchvision / timm / transformers，启动器环境已预装）。
+PIXAI_MODELS = [
+    {"id": "pixai-tagger-v1.0", "engine": "pixai",
+     "repo": "pixai-labs/pixai-tagger-v1.0",
+     "files": ["model.safetensors", "config.json",
+               "preprocessor_config.json", "tagger_pipeline.py"],
+     "label": "PixAI Tagger v1.0",
+     "remark": "动漫，3.1万标签含样式/版权标签，1008分辨率；角色0.27/标签0.17",
+     "size_gb": 1.9, "def_gen": 0.17, "def_char": 0.27},
+]
+
 MIRRORS = {"mirror": "https://hf-mirror.com", "official": "https://huggingface.co"}
 
 # 内置自然语言打标模型：JoyCaption Beta One（Llama 3.1 8B 视觉，擅长详细图像描述）。
@@ -194,11 +208,14 @@ def wd14_dir(model_id):
 
 
 def model_entry(cfg, model_id):
-    """按 id 查模型条目（内置 WD14 + CL）。"""
+    """按 id 查模型条目（内置 WD14 + CL + PixAI）。"""
     for m in WD14_MODELS:
         if m["id"] == model_id:
             return dict(m, files=DEFAULT_FILES, engine="wd14")
     for m in CL_MODELS:
+        if m["id"] == model_id:
+            return dict(m)
+    for m in PIXAI_MODELS:
         if m["id"] == model_id:
             return dict(m)
     return None
@@ -728,18 +745,97 @@ def _drop_tagger(model_id):
         print(f"[tagger] unloaded {model_id} session to free VRAM")
 
 
+# ---------------------------------------------------------------- PixAI Tagger 推理 ---
+
+_pixai_cache = {}   # model_id -> (model, processor, tags_split, tags, device)
+
+
+def _load_pixai(model_id, cfg):
+    """加载 PixAI Tagger（PyTorch + trust_remote_code 自定义代码，本地目录），
+    返回 (model, processor, tags_split, tags, device)。"""
+    if model_id in _pixai_cache:
+        return _pixai_cache[model_id]
+    with _sess_lock:
+        if model_id in _pixai_cache:
+            return _pixai_cache[model_id]
+        m = model_entry(cfg, model_id)
+        if not m:
+            raise FileNotFoundError(f"未知模型：{model_id}")
+        d = wd14_dir(model_id)
+        if not model_installed(m):
+            raise FileNotFoundError(f"模型未下载：{model_id}")
+        try:
+            import timm  # noqa: F401  tagger_pipeline.py 依赖 timm
+        except ImportError:
+            raise RuntimeError(
+                "PixAI Tagger 需要 timm 库，请在启动器目录执行："
+                "python\\python.exe -m pip install timm")
+        import torch
+        from transformers import AutoImageProcessor, AutoModel
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = AutoModel.from_pretrained(d, trust_remote_code=True)
+        model.to(device)
+        model.eval()
+        processor = AutoImageProcessor.from_pretrained(d, trust_remote_code=True)
+        _pixai_cache[model_id] = (model, processor,
+                                  model.config.tags_split, model.config.tags,
+                                  device)
+        print(f"[tagger] {model_id} loaded on {device} "
+              f"({sum(p.numel() for p in model.parameters()) / 1e6:.0f}M params)")
+        return _pixai_cache[model_id]
+
+
+def _pixai_interrogate(model_id, pil_img, gen_t, char_t, cfg):
+    """返回 (角色标签, 普通标签)。
+
+    阈值映射：character 用 char_t，general 用 gen_t；copyright 用官方推荐值 0.24
+    附在角色标签之后（角色/版权在前是 danbooru 惯例）；style 用 0.15 并入普通
+    标签；meta / rating 不输出；gen_t >= 1 时（双模型模式屏蔽普通标签）
+    非角色类全部关闭。"""
+    model, processor, split, tags, device = _load_pixai(model_id, cfg)
+    import torch
+    pv = processor(pil_img, return_tensors="pt")["pixel_values"].to(device)
+    with torch.no_grad():
+        probs = model(pv).sigmoid()[0].tolist()   # 按 tags_split 顺序排列
+
+    chars, general, copyright = [], [], []
+    idx = 0
+    for cat, count in split:
+        seg = [(tags[i], float(probs[i])) for i in range(idx, idx + count)]
+        idx += count
+        if cat == "character":
+            chars = [(t, c) for t, c in seg if c >= char_t]
+        elif cat == "general":
+            general = [(t, c) for t, c in seg if c >= gen_t]
+        elif cat == "style" and gen_t < 1.0:
+            general += [(t, c) for t, c in seg if c >= 0.15]
+        elif cat == "copyright" and gen_t < 1.0:
+            copyright = [(t, c) for t, c in seg if c >= 0.24]
+    chars.sort(key=lambda t: -t[1])
+    general.sort(key=lambda t: -t[1])
+    copyright.sort(key=lambda t: -t[1])
+    return chars + copyright, general
+
+
 def _unload_taggers():
-    """卸载全部标签模型（WD14 / CL 的 onnxruntime session），立刻释放显存/内存。
-    只应在批量任务或对比结束后调用（任务开始前必须已结束，无并发使用）。"""
+    """卸载全部标签模型（WD14 / CL 的 onnxruntime session + PixAI 的 torch 模型），
+    立刻释放显存/内存。只应在批量任务或对比结束后调用（任务开始前必须已结束，无并发使用）。"""
     n = 0
     with _sess_lock:
-        n = len(_sessions) + len(_cl_sessions)
+        n = len(_sessions) + len(_cl_sessions) + len(_pixai_cache)
         _sessions.clear()
         _cl_sessions.clear()
+        _pixai_cache.clear()
     if n:
         import gc
         gc.collect()
-        print(f"[tagger] unloaded {n} onnx session(s) to free VRAM")
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        print(f"[tagger] unloaded {n} tagger(s) to free VRAM")
 
 
 _llama_model = None
@@ -972,16 +1068,22 @@ def _append_prompts(prefix, suffix, body):
 
 
 def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg):
-    """按引擎分发标签推理（WD14 / CL），返回 (角色标签, 普通标签)。"""
-    if model_entry(model_cfg, model_id).get("engine") == "cl":
+    """按引擎分发标签推理（WD14 / CL / PixAI），返回 (角色标签, 普通标签)。"""
+    eng = model_entry(model_cfg, model_id).get("engine", "wd14")
+    if eng == "cl":
         return _cl_interrogate(model_id, im, gen_t, char_t, model_cfg)
+    if eng == "pixai":
+        return _pixai_interrogate(model_id, im, gen_t, char_t, model_cfg)
     return _wd14_interrogate(model_id, im, gen_t, char_t, model_cfg)
 
 
 def _load_tagger(model_id, model_cfg):
     """按引擎分发模型加载。"""
-    if model_entry(model_cfg, model_id).get("engine") == "cl":
+    eng = model_entry(model_cfg, model_id).get("engine", "wd14")
+    if eng == "cl":
         _load_cl(model_id, model_cfg)
+    elif eng == "pixai":
+        _load_pixai(model_id, model_cfg)
     else:
         _load_wd14(model_id, model_cfg)
 
@@ -1159,14 +1261,9 @@ def _run_compare(models, params):
             t0 = time.time()
             try:
                 if m["kind"] == "tag":
-                    if model_entry(model_cfg, m["id"]).get("engine") == "cl":
-                        chars, general = _cl_interrogate(
-                            m["id"], im, params["gen_t"], params["char_t"],
-                            model_cfg)
-                    else:
-                        chars, general = _wd14_interrogate(
-                            m["id"], im, params["gen_t"], params["char_t"],
-                            model_cfg)
+                    chars, general = _tag_interrogate(
+                        m["id"], im, params["gen_t"], params["char_t"],
+                        model_cfg)
                     items = chars + general
                     res["output"] = ", ".join(
                         [_escape_tag(t) for t, _ in items])
@@ -2472,7 +2569,7 @@ def _all_models(cfg):
     """主界面下拉框 + 配置窗口共用的模型清单。"""
     models = []
     thr_map = cfg.get("thresholds") or {}
-    for m in WD14_MODELS + CL_MODELS:
+    for m in WD14_MODELS + CL_MODELS + PIXAI_MODELS:
         engine = m.get("engine", "wd14")
         # 默认阈值：配置页设置优先，否则用注册表内置值（WD 无内置 → 0.35 / 0.85）
         t = thr_map.get(m["id"]) or {}
