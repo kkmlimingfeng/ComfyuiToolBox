@@ -495,7 +495,7 @@ PAGE = r"""<!doctype html>
   .tag { position:relative; display:flex; flex-direction:column;
          background:var(--card); border:1px solid var(--border); border-radius:10px;
          padding:7px 30px 7px 10px; margin:0 0 8px; break-inside:avoid; }
-  .tag .row1 { display:flex; align-items:flex-start; gap:6px; padding-right:48px; min-width:0; }
+  .tag .row1 { display:flex; align-items:flex-start; gap:6px; padding-right:var(--rowpad,52px); min-width:0; }
   .tag .nm { min-width:0; font-size:13px; font-weight:600; font-family:Consolas,monospace;
              word-break:break-all; line-height:1.35; }
   .tag .zh { font-size:12.5px; color:var(--zhc); margin-top:3px; line-height:1.35;
@@ -513,15 +513,41 @@ PAGE = r"""<!doctype html>
   .bd.v3 { background:#e67e22; color:#fff; }
   .bd.gb { background:#8e44ad; color:#fff; }
   .bd.cnt { background:var(--hover); color:var(--muted); }
-  .plus { position:absolute; top:6px; right:6px; width:22px; height:22px; border-radius:7px;
+  .plus { width:22px; height:22px; border-radius:7px; flex-shrink:0;
           border:1px solid var(--border); background:var(--hover); color:var(--text);
           font-size:15px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
   .plus:hover { background:#e67e22; border-color:#e67e22; color:#fff; }
   .plus.in { background:#e67e22; border-color:#e67e22; color:#fff; }
-  .edit { position:absolute; top:6px; right:32px; width:22px; height:22px; border-radius:7px;
+  .edit { width:22px; height:22px; border-radius:7px; flex-shrink:0;
           border:1px solid var(--border); background:var(--hover); color:var(--muted);
           font-size:12px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
   .edit:hover { background:#0984e3; border-color:#0984e3; color:#fff; }
+  .cpbtn { width:22px; height:22px; border-radius:7px; flex-shrink:0;
+           border:1px solid var(--border); background:var(--hover); color:var(--muted);
+           font-size:12px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .cpbtn:hover { background:#0a9d58; border-color:#0a9d58; color:#fff; }
+  /* 卡片右上角按钮组：右对齐紧凑排列，可设置显隐 / 悬停显示 */
+  .tag .btns { position:absolute; top:6px; right:6px; display:flex; gap:4px; }
+  body.nobtn_cp .cpbtn { display:none; }
+  body.nobtn_edit .edit { display:none; }
+  body.nobtn_plus .plus { display:none; }
+  body.hoverbtn .tag .btns { visibility:hidden; }
+  body.hoverbtn .tag:hover .btns { visibility:visible; }
+  body.hoverbtn .tag { transition:padding-right .12s; }
+  body.hoverbtn .tag:hover { padding-right:88px; }
+  /* 复制 / 购物车 设置弹层 */
+  .setpop { position:fixed; z-index:65; width:280px; background:var(--card);
+            border:1px solid var(--border); border-radius:12px; padding:12px 14px;
+            box-shadow:0 8px 30px rgba(0,0,0,.25); display:none; }
+  .setpop.open { display:block; }
+  .setpop .setsec { font-size:12px; color:var(--muted); margin:8px 0 4px; font-weight:600; }
+  .setpop .setsec:first-child { margin-top:0; }
+  .setpop label { display:flex; align-items:center; gap:7px; font-size:13px;
+                  padding:5px 2px; cursor:pointer; user-select:none; }
+  .setpop .setnote { font-size:11px; color:var(--muted); margin-top:8px;
+                     border-top:1px dashed var(--border); padding-top:8px; line-height:1.7; }
+  .head #setbtn { background:var(--hover); color:var(--text); font-size:15px; padding:9px 12px; }
+  .head #setbtn:hover { background:#6c5ce7; color:#fff; }
   /* 编辑标签模态框 */
   .modal { position:fixed; inset:0; z-index:80; display:none; align-items:center; justify-content:center;
            background:rgba(0,0,0,.45); }
@@ -608,6 +634,7 @@ PAGE = r"""<!doctype html>
   <div class="head">
     <input id="q" placeholder="搜索标签：中文 / 英文 / 别名，带不带下划线都可以（如 long hair、long_hair、长发、/lh）">
     <button onclick="doSearch(true)">搜索</button>
+    <button id="setbtn" onclick="toggleSet()" title="复制 / 购物车设置">⚙</button>
     <input id="minc" type="number" min="0" step="100" placeholder="最低次数" title="只显示使用次数 ≥ 该值的标签，清空恢复全部">
     <span class="srcs">
       <button class="srcbtn sdb on" id="src_db" onclick="toggleSrc('db')" title="要求标签包含 danbooru 来源（交集，可多选；全灭=不过滤）">danbooru</button>
@@ -637,6 +664,22 @@ PAGE = r"""<!doctype html>
       <button class="cp" onclick="copyCart()">复制</button>
       <button class="cl" onclick="clearCart()">清空</button>
     </div>
+  </div>
+  <div class="setpop" id="setpop">
+    <div class="setsec">复制设置（卡片右上角 ⧉ 按钮）</div>
+    <label><input type="checkbox" id="cfg_copy_esc" onchange="setCfg('copy','esc',this.checked)"> 转义括号：( → \(</label>
+    <label><input type="checkbox" id="cfg_copy_sp" onchange="setCfg('copy','sp',this.checked)"> 下划线转空格：_ → 空格</label>
+    <div class="setsec">购物车设置</div>
+    <label><input type="checkbox" id="cfg_cart_esc" onchange="setCfg('cart','esc',this.checked)"> 转义括号</label>
+    <label><input type="checkbox" id="cfg_cart_sp" onchange="setCfg('cart','sp',this.checked)"> 下划线转空格</label>
+    <div class="setsec">卡片按钮</div>
+    <label><input type="checkbox" id="cfg_card_cp" onchange="setCfg('card','cp',this.checked)"> 显示 ⧉ 复制按钮</label>
+    <label><input type="checkbox" id="cfg_card_edit" onchange="setCfg('card','edit',this.checked)"> 显示 ✎ 编辑按钮</label>
+    <label><input type="checkbox" id="cfg_card_plus" onchange="setCfg('card','plus',this.checked)"> 显示 ＋ 加购按钮</label>
+    <label><input type="checkbox" id="cfg_card_hover" onchange="setCfg('card','hover',this.checked)"> 悬停卡片时才显示按钮</label>
+    <div class="setnote">示例：long_hair + (genshin impact)<br>
+      勾选转义 → long_hair, \(genshin impact\)<br>
+      勾选转空格 → long hair, (genshin impact)</div>
   </div>
   <div class="toast" id="toast"></div>
   <div class="modal" id="modal" onclick="if(event.target===this) closeEdit()">
@@ -692,6 +735,65 @@ function toggleSrc(k) {
     doSearch(true);
 }
 
+// ---------- 复制 / 购物车 设置 ----------
+let copyCfg = { esc: false, sp: false };   // 卡片 ⧉ 复制按钮的格式化选项
+let cartCfg = { esc: false, sp: false };   // 购物车组合 / 复制的格式化选项
+let cardCfg = { cp: true, edit: true, plus: true, hover: false };   // 卡片右上角按钮显隐
+try { Object.assign(copyCfg, JSON.parse(localStorage.getItem('ls_copy_cfg') || '{}')); } catch (e) {}
+try { Object.assign(cartCfg, JSON.parse(localStorage.getItem('ls_cart_cfg') || '{}')); } catch (e) {}
+try { Object.assign(cardCfg, JSON.parse(localStorage.getItem('ls_card_cfg') || '{}')); } catch (e) {}
+function saveCfg() {
+    try { localStorage.setItem('ls_copy_cfg', JSON.stringify(copyCfg));
+          localStorage.setItem('ls_cart_cfg', JSON.stringify(cartCfg));
+          localStorage.setItem('ls_card_cfg', JSON.stringify(cardCfg)); } catch (e) {}
+}
+// 按卡片按钮设置同步 body class 与文字预留宽度
+function syncCardCfg() {
+    const b = document.body;
+    b.classList.toggle('nobtn_cp', !cardCfg.cp);
+    b.classList.toggle('nobtn_edit', !cardCfg.edit);
+    b.classList.toggle('nobtn_plus', !cardCfg.plus);
+    b.classList.toggle('hoverbtn', cardCfg.hover);
+    const n = (cardCfg.cp ? 1 : 0) + (cardCfg.edit ? 1 : 0) + (cardCfg.plus ? 1 : 0);
+    const pad = (cardCfg.hover || n === 0) ? 8 : n * 26 + 6;
+    document.documentElement.style.setProperty('--rowpad', pad + 'px');
+}
+function applyFmt(s, cfg) {
+    if (cfg.sp) s = s.replace(/_/g, ' ');
+    if (cfg.esc) s = s.replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+    return s;
+}
+function setCfg(which, key, val) {
+    if (which === 'card') { cardCfg[key] = val; saveCfg(); syncCardCfg(); return; }
+    (which === 'copy' ? copyCfg : cartCfg)[key] = val;
+    saveCfg();
+    if (which === 'cart') renderCart();   // 购物车格式变化立即刷新组合串
+}
+function initSetUI() {
+    document.getElementById('cfg_copy_esc').checked = copyCfg.esc;
+    document.getElementById('cfg_copy_sp').checked = copyCfg.sp;
+    document.getElementById('cfg_cart_esc').checked = cartCfg.esc;
+    document.getElementById('cfg_cart_sp').checked = cartCfg.sp;
+    document.getElementById('cfg_card_cp').checked = cardCfg.cp;
+    document.getElementById('cfg_card_edit').checked = cardCfg.edit;
+    document.getElementById('cfg_card_plus').checked = cardCfg.plus;
+    document.getElementById('cfg_card_hover').checked = cardCfg.hover;
+}
+function toggleSet() {
+    const pop = document.getElementById('setpop');
+    if (pop.classList.contains('open')) { pop.classList.remove('open'); return; }
+    initSetUI();
+    const b = document.getElementById('setbtn').getBoundingClientRect();
+    pop.style.right = Math.max(10, window.innerWidth - b.right) + 'px';
+    pop.style.top = (b.bottom + 6) + 'px';
+    pop.classList.add('open');
+}
+document.addEventListener('click', e => {
+    const pop = document.getElementById('setpop');
+    if (pop.classList.contains('open') && !pop.contains(e.target)
+        && e.target.id !== 'setbtn') pop.classList.remove('open');
+}, true);
+
 // ---------- 购物车 ----------
 let cart = {};   // 对象键顺序 = 插入顺序，即组合顺序
 try { cart = JSON.parse(localStorage.getItem('label_shop_cart') || '{}'); } catch (e) { cart = {}; }
@@ -718,7 +820,7 @@ function rmCart(n) { delete cart[n]; saveCart(); renderCartN(); renderCart(); sy
 function clearCart() { cart = {}; saveCart(); renderCartN(); renderCart(); syncAddBtns(); }
 function renderCart() {
     const items = cartList();
-    document.getElementById('cartStr').value = items.map(t => t.n).join(', ');
+    document.getElementById('cartStr').value = items.map(t => applyFmt(t.n, cartCfg)).join(', ');
     document.getElementById('chint').textContent = items.length ? '共 ' + items.length + ' 个标签，拖动可调整组合顺序' : '';
     const box = document.getElementById('ctags');
     box.innerHTML = items.length ? items.map(t =>
@@ -738,6 +840,13 @@ function copyCart() {
     navigator.clipboard.writeText(s).then(() => toast('已复制 ' + Object.keys(cart).length + ' 个标签')).catch(() => {
         const ta = document.createElement('textarea'); ta.value = s; document.body.appendChild(ta);
         ta.select(); document.execCommand('copy'); ta.remove(); toast('已复制');
+    });
+}
+function copyTag(n) {
+    const s = applyFmt(n, copyCfg);
+    navigator.clipboard.writeText(s).then(() => toast('已复制 ' + s)).catch(() => {
+        const ta = document.createElement('textarea'); ta.value = s; document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy'); ta.remove(); toast('已复制 ' + s);
     });
 }
 
@@ -803,10 +912,14 @@ function tagHtml(t) {
         + '<span class="bd cnt">' + esc(catText) + '</span>'
         + '</div>'
         + (t.a && t.a.length ? '<div class="zh" style="opacity:.6;margin-top:2px">别名: ' + t.a.map(esc).join(' / ') + '</div>' : '')
+        + '<div class="btns">'
+        + '<button class="cpbtn" title="复制标签（按搜索框旁 ⚙ 复制设置）" onclick=\'copyTag('
+        + JSON.stringify(t.n).replace(/'/g, '&#39;') + ')\'>⧉</button>'
         + '<button class="edit" title="编辑翻译 / 机翻 / 备注" onclick=\'openEdit('
         + JSON.stringify(t.n).replace(/'/g, '&#39;') + ')\'>✎</button>'
         + '<button class="plus' + (inCart ? ' in' : '') + '" data-add="' + esc(t.n) + '" onclick=\'addToCart('
-        + JSON.stringify(t).replace(/'/g, '&#39;') + ', this)\' title="' + (inCart ? '从购物车移除' : '加入购物车') + '">' + (inCart ? '✓' : '＋') + '</button></div>';
+        + JSON.stringify(t).replace(/'/g, '&#39;') + ', this)\' title="' + (inCart ? '从购物车移除' : '加入购物车') + '">' + (inCart ? '✓' : '＋') + '</button>'
+        + '</div></div>';
 }
 // 编辑保存后按名字找到当前列表里的对应卡片并整体替换
 function refreshCard(t) {
@@ -968,7 +1081,7 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.target.id !== 'emNote') { e.preventDefault(); saveEdit(); }
 });
 
-renderCartN(); renderCart();
+renderCartN(); renderCart(); syncCardCfg();
 
 // ---------- 数据源 CSV 切换 ----------
 async function loadCsvList() {
