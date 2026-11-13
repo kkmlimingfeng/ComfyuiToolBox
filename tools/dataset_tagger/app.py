@@ -786,12 +786,11 @@ def _load_pixai(model_id, cfg):
 
 
 def _pixai_interrogate(model_id, pil_img, gen_t, char_t, cfg):
-    """返回 (角色标签, 普通标签)。
+    """返回 (角色标签, 作品标签(copyright), 普通标签)。
 
-    阈值映射：character 用 char_t，general 用 gen_t；copyright 用官方推荐值 0.24
-    附在角色标签之后（角色/版权在前是 danbooru 惯例）；style 用 0.15 并入普通
-    标签；meta / rating 不输出；gen_t >= 1 时（双模型模式屏蔽普通标签）
-    非角色类全部关闭。"""
+    阈值映射：character 用 char_t，general 用 gen_t；copyright 用官方推荐值 0.24；
+    style 用 0.15 并入普通标签；meta / rating 不输出；gen_t >= 1 时（双模型模式
+    屏蔽普通标签）非角色类全部关闭。"""
     model, processor, split, tags, device = _load_pixai(model_id, cfg)
     import torch
     pv = processor(pil_img, return_tensors="pt")["pixel_values"].to(device)
@@ -814,7 +813,7 @@ def _pixai_interrogate(model_id, pil_img, gen_t, char_t, cfg):
     chars.sort(key=lambda t: -t[1])
     general.sort(key=lambda t: -t[1])
     copyright.sort(key=lambda t: -t[1])
-    return chars + copyright, general
+    return chars, copyright, general
 
 
 def _unload_taggers():
@@ -1067,14 +1066,29 @@ def _append_prompts(prefix, suffix, body):
     return ", ".join(parts)
 
 
+def _order_caption(chars, cpr, general):
+    """打标 caption 主体固定顺序（组内保持模型输出的置信度顺序）：
+    角色 → 作品(copyright) → 含 girl 标签 → solo → 含 look 标签 → 其余标签。
+    前缀/后缀由 _append_prompts 另行拼接。"""
+    low = [t.lower() for t in general]
+    girls = [t for t, l in zip(general, low) if "girl" in l]
+    solo = [t for t, l in zip(general, low) if l == "solo"]
+    looks = [t for t, l in zip(general, low) if "look" in l and l != "solo"]
+    rest = [t for t, l in zip(general, low)
+            if "girl" not in l and l != "solo" and "look" not in l]
+    return chars + cpr + girls + solo + looks + rest
+
+
 def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg):
-    """按引擎分发标签推理（WD14 / CL / PixAI），返回 (角色标签, 普通标签)。"""
+    """按引擎分发标签推理（WD14 / CL / PixAI），统一返回 (角色, 作品(copyright), 普通)。"""
     eng = model_entry(model_cfg, model_id).get("engine", "wd14")
     if eng == "cl":
-        return _cl_interrogate(model_id, im, gen_t, char_t, model_cfg)
+        chars, general = _cl_interrogate(model_id, im, gen_t, char_t, model_cfg)
+        return chars, [], general
     if eng == "pixai":
         return _pixai_interrogate(model_id, im, gen_t, char_t, model_cfg)
-    return _wd14_interrogate(model_id, im, gen_t, char_t, model_cfg)
+    chars, general = _wd14_interrogate(model_id, im, gen_t, char_t, model_cfg)
+    return chars, [], general
 
 
 def _load_tagger(model_id, model_cfg):
@@ -1139,16 +1153,18 @@ def _run_job(cfg, model_cfg):
                     im.load()
                     if mode == "tag":
                         if char_model == model:
-                            chars, general = _tag_interrogate(
+                            chars, cpr, general = _tag_interrogate(
                                 model, im, cfg["gen_t"], cfg["char_t"], model_cfg)
                         else:
                             # 不同模型：角色模型只取角色（阈值 1.1 屏蔽普通标签），
-                            # 标签模型只取普通标签，再拼接
-                            chars, _ = _tag_interrogate(
+                            # 标签模型只取普通+作品标签，再拼接
+                            chars, _, _ = _tag_interrogate(
                                 char_model, im, 1.1, cfg["char_t"], model_cfg)
-                            _, general = _tag_interrogate(
+                            _, cpr, general = _tag_interrogate(
                                 model, im, cfg["gen_t"], 1.1, model_cfg)
-                        raw = [t for t, _ in chars] + [t for t, _ in general]
+                        raw = _order_caption(
+                            [t for t, _ in chars], [t for t, _ in cpr],
+                            [t for t, _ in general])
                         if spaces:
                             raw = [t.replace("_", " ") for t in raw]
                         body = ", ".join([_escape_tag(t) for t in raw])
@@ -1261,10 +1277,10 @@ def _run_compare(models, params):
             t0 = time.time()
             try:
                 if m["kind"] == "tag":
-                    chars, general = _tag_interrogate(
+                    chars, cpr, general = _tag_interrogate(
                         m["id"], im, params["gen_t"], params["char_t"],
                         model_cfg)
-                    items = chars + general
+                    items = chars + cpr + general   # 对比页保持角色/版权/普通的原始顺序
                     res["output"] = ", ".join(
                         [_escape_tag(t) for t, _ in items])
                     # 附带置信度（3 位小数），对比页在每个标签旁展示
