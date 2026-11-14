@@ -533,8 +533,6 @@ PAGE = r"""<!doctype html>
   body.nobtn_plus .plus { display:none; }
   body.hoverbtn .tag .btns { visibility:hidden; }
   body.hoverbtn .tag:hover .btns { visibility:visible; }
-  body.hoverbtn .tag { transition:padding-right .12s; }
-  body.hoverbtn .tag:hover { padding-right:88px; }
   /* 复制 / 购物车 设置弹层 */
   .setpop { position:fixed; z-index:65; width:280px; background:var(--card);
             border:1px solid var(--border); border-radius:12px; padding:12px 14px;
