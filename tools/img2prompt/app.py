@@ -562,6 +562,18 @@ def start_load(key, n_ctx=N_CTX, kv_cache="q8_0", thinking="auto",
 
 # ---------------------------------------------------------------- 推理 ---
 
+def count_output_tokens(text):
+    """统计最终可见文本的 token 数（思考内容已被截掉，不计入）。"""
+    if not text:
+        return 0
+    if _model is not None:
+        try:
+            return len(_model.tokenize(text.encode("utf-8")))
+        except Exception:
+            pass
+    return max(1, len(text) // 2)   # 无分词器时的粗略回退
+
+
 def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int | None = DEFAULT_RES,
                   max_tokens: int = MAX_NEW_TOKENS) -> str:
     pil_img = pil_img.convert("RGB")
@@ -589,15 +601,15 @@ def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int | None =
         top_k=20,
     )
     sec = time.time() - t0
-    usage = resp.get("usage") or {}
-    n_tok = usage.get("completion_tokens") or 0
-    stats = {"sec": round(sec, 1), "tokens": n_tok,
-             "tps": round(n_tok / sec, 1) if sec > 0 else 0.0}
     text = (resp["choices"][0]["message"].get("content") or "").strip()
     # 保险：去掉可能出现的思考块和引号
     if "</think>" in text:
         text = text.split("</think>", 1)[1].strip()
-    return text.strip('"').strip(), stats
+    text = text.strip('"').strip()
+    n_tok = count_output_tokens(text)
+    stats = {"sec": round(sec, 1), "tokens": n_tok,
+             "tps": round(n_tok / sec, 1) if sec > 0 else 0.0}
+    return text, stats
 
 
 def extract_video_frames(video_path, sample_fps, max_side):
@@ -702,14 +714,14 @@ def analyze_video_frames(frames, lang="zh", max_tokens=4096,
         top_k=20,
     )
     sec = time.time() - t0
-    usage = resp.get("usage") or {}
-    n_tok = usage.get("completion_tokens") or 0
     text = (resp["choices"][0]["message"].get("content") or "").strip()
     if "</think>" in text:
         text = text.split("</think>", 1)[1].strip()
+    text = text.strip('"').strip()
+    n_tok = count_output_tokens(text)
     stats = {"sec": round(sec, 1), "tokens": n_tok,
              "tps": round(n_tok / sec, 1) if sec > 0 else 0.0}
-    return text.strip('"').strip(), stats
+    return text, stats
 
 
 def synthesize_video_prompt(segments, lang="zh", max_tokens=4096):
@@ -740,14 +752,14 @@ def synthesize_video_prompt(segments, lang="zh", max_tokens=4096):
         top_k=20,
     )
     sec = time.time() - t0
-    usage = resp.get("usage") or {}
-    n_tok = usage.get("completion_tokens") or 0
     text = (resp["choices"][0]["message"].get("content") or "").strip()
     if "</think>" in text:
         text = text.split("</think>", 1)[1].strip()
+    text = text.strip('"').strip()
+    n_tok = count_output_tokens(text)
     stats = {"sec": round(sec, 1), "tokens": n_tok,
              "tps": round(n_tok / sec, 1) if sec > 0 else 0.0}
-    return text.strip('"').strip(), stats
+    return text, stats
 
 
 # ---------------------------------------------------------------- Flask ---

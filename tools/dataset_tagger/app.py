@@ -45,6 +45,7 @@ PORT = 7869
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 MIN_ONNX_BYTES = 50 * 1024 * 1024   # 小于此值视为下载不完整
+NL_THINK_BUDGET = 2048              # 支持思考的 NL 模型额外预留的思考 token，不占用输出长度
 
 # ---------------------------------------------------------------- 模型注册 ---
 
@@ -989,9 +990,30 @@ def _fit_image_to_ctx(pil_img, n_ctx, prompt, max_tokens=512):
     return pil_img.resize((nw, nh))
 
 
+def _nl_text_tokens(text):
+    """统计最终可见文本的 token 数（不含思考内容）。"""
+    if not text:
+        return 0
+    try:
+        return len(_llama_model.tokenize(text.encode("utf-8")))
+    except Exception:
+        return max(1, len(text) // 2)
+
+
+def _nl_thinks():
+    """当前 NL 模型模板是否支持思考（Qwen3 系默认开启）。"""
+    try:
+        meta = getattr(_llama_model, "metadata", None) or {}
+        template = str(meta.get("tokenizer.chat_template") or "")
+    except Exception:
+        return False
+    return "enable_thinking" in template
+
+
 def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192,
                     max_tokens=512, should_cancel=None):
     _load_llama(key, n_ctx)
+    think_extra = NL_THINK_BUDGET if _nl_thinks() else 0
     pil_img = pil_img.convert("RGB")
     try:
         max_side = int(max_side)
@@ -999,7 +1021,8 @@ def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192,
         max_side = 1536
     if max_side > 0 and max(pil_img.size) > max_side:
         pil_img.thumbnail((max_side, max_side))
-    pil_img = _fit_image_to_ctx(pil_img, n_ctx, prompt, max_tokens)
+    # max_tokens 只约束最终可见输出；支持思考时额外预留思考预算
+    pil_img = _fit_image_to_ctx(pil_img, n_ctx, prompt, max_tokens + think_extra)
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -1010,8 +1033,12 @@ def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192,
             {"type": "text", "text": prompt},
         ],
     }]
-    kw = dict(messages=messages, max_tokens=max_tokens, temperature=0.3,
-              top_p=0.8, top_k=20)
+    kw = dict(messages=messages, max_tokens=max_tokens + think_extra,
+              temperature=0.3, top_p=0.8, top_k=20)
+    if think_extra:
+        kw["reasoning_budget"] = NL_THINK_BUDGET
+        kw["reasoning_start_in_prompt"] = True
+    t0 = time.time()
     try:
         if should_cancel is None:
             resp = _llama_model.create_chat_completion(**kw)
@@ -1038,7 +1065,12 @@ def _nl_interrogate(key, pil_img, prompt, max_side=1536, n_ctx=8192,
             f"降低图片分辨率或换更小模型）：{e}") from e
     if "</think>" in text:
         text = text.split("</think>", 1)[1].strip()
-    return text.strip('"').strip()
+    text = text.strip('"').strip()
+    sec = time.time() - t0
+    n_tok = _nl_text_tokens(text)
+    stats = {"sec": round(sec, 1), "tokens": n_tok,
+             "tps": round(n_tok / sec, 1) if sec > 0 else 0.0}
+    return text, stats
 
 
 # ---------------------------------------------------------------- 打标任务 ---
@@ -1180,7 +1212,7 @@ def _run_job(cfg, model_cfg):
                         for t in raw:
                             freq[t] = freq.get(t, 0) + 1
                     else:
-                        body = _nl_interrogate(
+                        body, _nl_stats = _nl_interrogate(
                             model, im, cfg.get("nl_prompt", ""),
                             max_side=cfg.get("nl_res", 1536),
                             n_ctx=cfg.get("n_ctx", 8192),
@@ -1295,11 +1327,14 @@ def _run_compare(models, params):
                     # 附带置信度（3 位小数），对比页在每个标签旁展示
                     res["detail"] = [[t, round(c, 3)] for t, c in items]
                 else:
-                    res["output"] = _nl_interrogate(
+                    res["output"], nl_stats = _nl_interrogate(
                         m["id"], im, params["nl_prompt"],
                         max_side=params["res"], n_ctx=params["n_ctx"],
                         max_tokens=params["maxt"],
                         should_cancel=lambda: _cmp["cancel"])
+                    res["tokens"] = nl_stats["tokens"]
+                    res["tps"] = nl_stats["tps"]
+                    res["gen_sec"] = nl_stats["sec"]
                 res["ok"] = True
             except _CompareStopped:
                 # 用户停止：当前模型作废，整体结束
@@ -1584,6 +1619,7 @@ PAGE = r"""<!doctype html>
   .rcard .rtagi { display:inline-block; margin:0 10px 2px 0; }
   .rcard .rtagi i { font-style:normal; opacity:.55; font-size:11px; }
   .rcard .rnl { font-size:13.5px; line-height:1.7; white-space:pre-wrap; }
+  .rcard .rstats { margin-top:6px; font-size:12px; opacity:.6; }
   .rcard .rerr { color:#c0392b; font-size:13px; white-space:pre-wrap; }
   body.dark .rcard .rerr { color:#ff7675; }
   .rcard .rzh { color:var(--tr-color, #00b894); font-size:var(--tr-size, 13px);
@@ -1647,6 +1683,7 @@ PAGE = r"""<!doctype html>
       <div class="row">
         <label class="lab">提示词</label>
         <div class="tip" style="margin:0">给视觉模型的指令，告诉它怎么描述图片（可自由修改）</div>
+        <button class="plain" id="nlSave" onclick="saveNlPrompt('nl_prompt')" style="margin-left:auto">保存</button>
       </div>
       <textarea id="nl_prompt" spellcheck="false"></textarea>
       <div class="row" style="margin-top:10px">
@@ -1661,7 +1698,7 @@ PAGE = r"""<!doctype html>
           <option value="2048">2048（超清·慢）</option>
         </select>
       </div>
-      <div class="tip" style="margin:-4px 0 8px 120px">输出长度（最多生成的 token 数）与图片分辨率（长边上限）仅对自然语言打标生效</div>
+      <div class="tip" style="margin:-4px 0 8px 120px">输出长度（最终可见文本 token 数，不含思考）与图片分辨率（长边上限）仅对自然语言打标生效</div>
     </div>
 
     <div class="row" style="margin-top:12px">
@@ -1745,11 +1782,12 @@ PAGE = r"""<!doctype html>
         <option value="2048">2048（超清·慢）</option>
       </select>
     </div>
-    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；输出长度（最多生成的 token 数）与图片分辨率仅对自然语言模型生效</div>
+    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；输出长度（最终可见文本 token 数，不含思考）与图片分辨率仅对自然语言模型生效</div>
 
     <div class="row">
       <label class="lab">NL 提示词</label>
       <div class="tip" style="margin:0">自然语言模型使用的指令（可自由修改）</div>
+      <button class="plain" id="cmpNlSave" onclick="saveNlPrompt('cmp_nl_prompt')" style="margin-left:auto">保存</button>
     </div>
     <textarea id="cmp_nl_prompt" spellcheck="false"></textarea>
 
@@ -1897,6 +1935,25 @@ function maybeAutoPrompt(m, box) {
         box.value = m.def_prompt;
         _lastAutoPrompt = m.def_prompt;
     }
+}
+
+// 保存 NL 提示词到 config.json；两个输入框保持同步
+async function saveNlPrompt(id) {
+    const btn = $(id === 'cmp_nl_prompt' ? 'cmpNlSave' : 'nlSave');
+    const old = btn.textContent;
+    try {
+        const r = await fetch('/api/nl_prompt', { method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ prompt: $(id).value }) });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || '保存失败');
+        $('nl_prompt').value = d.prompt;
+        $('cmp_nl_prompt').value = d.prompt;
+        btn.textContent = '已保存';
+    } catch (e) {
+        btn.textContent = '保存失败';
+    }
+    setTimeout(() => { btn.textContent = old; }, 1500);
 }
 function applyDefThr() {
     const m = models.find(x => x.id === $('model').value);
@@ -2541,6 +2598,12 @@ async function pollCmp() {
                 } else {
                     body = '<div class="' + (res.kind === 'tag' ? 'rtag' : 'rnl') + '">'
                          + escapeHtml(res.output) + '</div>';
+                    if (res.kind !== 'tag' && res.tokens != null) {
+                        body += '<div class="rstats">' + res.tokens + ' tok · '
+                              + res.tps + ' tok/s'
+                              + (res.gen_sec != null ? ' · 生成 ' + res.gen_sec + 's' : '')
+                              + '</div>';
+                    }
                 }
             } else {
                 body = '<div class="rerr">❌ ' + escapeHtml(res.error) + '</div>';
@@ -2572,7 +2635,7 @@ async function pollCmp() {
         const j = await r.json();
         $('nl_prompt').value = j.prompt;
         $('cmp_nl_prompt').value = j.prompt;
-        _lastAutoPrompt = j.prompt;
+        _lastAutoPrompt = j.default || j.prompt;
     } catch (e) {}
     await loadModels();
     pollJob();
@@ -2712,7 +2775,23 @@ def api_config_post():
 
 @app.get("/api/nl_prompt")
 def api_nl_prompt():
-    return jsonify({"ok": True, "prompt": DEFAULT_NL_PROMPT})
+    cfg = load_config()
+    saved = (cfg.get("nl_prompt") or "").strip()
+    return jsonify({"ok": True, "prompt": saved or DEFAULT_NL_PROMPT,
+                    "default": DEFAULT_NL_PROMPT})
+
+
+@app.post("/api/nl_prompt")
+def api_nl_prompt_save():
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    cfg = load_config()
+    if prompt:
+        cfg["nl_prompt"] = prompt
+    else:
+        cfg.pop("nl_prompt", None)   # 清空 = 恢复默认提示词
+    save_config(cfg)
+    return jsonify({"ok": True, "prompt": prompt or DEFAULT_NL_PROMPT})
 
 
 @app.post("/api/download")
