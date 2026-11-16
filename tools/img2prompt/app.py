@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import struct
 import tempfile
 import threading
 import time
@@ -31,14 +32,12 @@ SYS_FILE = os.path.join(BASE_DIR, "system_prompt.json")   # 系统提示词持�
 PORT = 7867
 MAX_NEW_TOKENS = 512
 N_CTX = 32768                # 默认上下文长度
-VIDEO_CTX_OPTIONS = ({4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768,
-                      49152, 65536, 98304, 131072, 262144})
 DEFAULT_RES = 1536           # 默认图像长边上限：768 快 / 1024 均衡 / 1536 高清
 VIDEO_MAX_FPS = 30
 VIDEO_MAX_SAMPLES = 600
 VIDEO_MAX_BYTES = 1024 * 1024 * 1024
 VIDEO_PROMPT_FILE = os.path.join(BASE_DIR, "video_prompt.json")
-KV_CACHE_OPTIONS = {"q8_0", "f16"}
+KV_CACHE_OPTIONS = {"q4_0", "q8_0", "f16"}
 
 # JoyCaption's embedded ChatML template concatenates message content as a string,
 # which fails when llama.cpp receives the image_url/text content list.
@@ -69,6 +68,63 @@ JOYCAPTION_CHAT_TEMPLATE = (
 # 命名约定：mmproj 文件名中 "mmproj" 字段紧跟模型名，如
 #   主模型  <模型名>-<量化>.gguf
 #   mmproj  <模型名>-mmproj-<量化>.gguf
+
+# GGUF 元数据（只读 KV 区，不加载权重）：用于判断模型模板是否支持思考开关
+_GGUF_SCALAR_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+_gguf_template_cache = {}
+
+
+def _gguf_read_string(f):
+    (length,) = struct.unpack("<Q", f.read(8))
+    return f.read(length)
+
+
+def _gguf_skip_value(f, vtype):
+    if vtype == 8:                      # string
+        (length,) = struct.unpack("<Q", f.read(8))
+        f.seek(length, os.SEEK_CUR)
+    elif vtype == 9:                    # array
+        (etype,) = struct.unpack("<I", f.read(4))
+        (count,) = struct.unpack("<Q", f.read(8))
+        size = _GGUF_SCALAR_SIZE.get(etype)
+        if size:
+            f.seek(size * count, os.SEEK_CUR)
+        else:
+            for _ in range(count):
+                _gguf_skip_value(f, etype)
+    else:                               # 定长标量
+        f.seek(_GGUF_SCALAR_SIZE.get(vtype, 0), os.SEEK_CUR)
+
+
+def gguf_chat_template(path):
+    """从 GGUF 头部读取 tokenizer.chat_template；读不到时返回空串。"""
+    try:
+        st = os.stat(path)
+        cache_key = (path, st.st_mtime_ns, st.st_size)
+        if cache_key in _gguf_template_cache:
+            return _gguf_template_cache[cache_key]
+        template = ""
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return ""
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return ""
+            f.read(8)                   # tensor_count
+            (kv_count,) = struct.unpack("<Q", f.read(8))
+            for _ in range(kv_count):
+                name = _gguf_read_string(f).decode("utf-8", "ignore")
+                (vtype,) = struct.unpack("<I", f.read(4))
+                if name == "tokenizer.chat_template" and vtype == 8:
+                    template = _gguf_read_string(f).decode("utf-8", "ignore")
+                    break
+                _gguf_skip_value(f, vtype)
+        _gguf_template_cache[cache_key] = template
+        return template
+    except Exception:
+        return ""
+
+
 def scan_models():
     """扫描 model/ 下的 GGUF，返回 {key: {label, model, mmproj}}。key 为主模型文件名（去 .gguf）。"""
     models = {}
@@ -96,10 +152,12 @@ def scan_models():
             continue
         mp = mmprojs[best]
         size = os.path.getsize(os.path.join(MODEL_DIR, f)) / 1024**3
+        template = gguf_chat_template(os.path.join(MODEL_DIR, f))
         models[stem] = {
             "label": f"{stem}（≈{size:.1f}G）",
             "model": f,
             "mmproj": mp,
+            "supports_thinking": "enable_thinking" in template,
         }
     return models
 
@@ -149,8 +207,6 @@ INSTRUCTION_EN = (
     "- Use natural, fluent English in a single paragraph, no line breaks, no bullet points, no markdown.\n"
     "- Output ONLY the prompt text itself. No explanations, no quotes, no prefix like 'Prompt:'."
 )
-INSTRUCTIONS = {"zh": INSTRUCTION_ZH, "en": INSTRUCTION_EN}
-
 VIDEO_SYS_PROMPT = (
     "按时间顺序分析这段视频抽取出的画面，并写成可用于视频生成模型的提示词。"
     "描述主体、场景、连续动作与动作变化、镜头运动、构图、光线、色彩和视觉风格；"
@@ -186,6 +242,8 @@ _model = None
 _state = {"status": "unloaded",
           "device": "GPU（llama.cpp 自动 offload）" if DEVICE == "cuda" else "CPU",
           "model": None, "n_ctx": None, "kv_cache": None,
+          "thinking": "auto", "image_max_tokens": -1,
+          "batch_max_tokens": 1024, "n_ubatch": 512,
           "error": None}  # 模型默认不自动加载
 _infer_lock = threading.Lock()      # llama.cpp 同一上下文不支持并发推理，必须串行化
 _model_op_lock = threading.Lock()   # 串行化 加载/卸载 操作
@@ -387,7 +445,8 @@ def _nvml_mem():
         return None
 
 
-def load_model(key, n_ctx=N_CTX, kv_cache="q8_0"):
+def load_model(key, n_ctx=N_CTX, kv_cache="q8_0", thinking="auto",
+               image_max_tokens=-1, batch_max_tokens=1024, n_ubatch=512):
     global _model
     try:
         m = scan_models().get(key)
@@ -398,25 +457,40 @@ def load_model(key, n_ctx=N_CTX, kv_cache="q8_0"):
         for p in (model_path, mmproj_path):
             if not os.path.isfile(p):
                 raise FileNotFoundError(f"缺少模型文件: {p}")
+        thinking = str(thinking or "auto").lower()
+        if thinking not in ("auto", "on", "off") or not m.get("supports_thinking"):
+            thinking = "auto"
         t0 = time.time()
-        print(f"[model] device={DEVICE} loading {m['model']} ...")
+        print(f"[model] device={DEVICE} loading {m['model']} ... thinking={thinking}")
 
         from llama_cpp import Llama
         from llama_cpp._ggml import GGMLType
 
         cache_type = {
+            "q4_0": int(GGMLType.GGML_TYPE_Q4_0),
             "q8_0": int(GGMLType.GGML_TYPE_Q8_0),
             "f16": int(GGMLType.GGML_TYPE_F16),
         }[kv_cache]
+
+        # 视觉编码相关的 mtmd 参数；思考模式为“自动”时不干预模型模板默认
+        handler_kwargs = {"batch_max_tokens": batch_max_tokens}
+        if thinking != "auto":
+            handler_kwargs["extra_template_arguments"] = {
+                "enable_thinking": thinking == "on"
+            }
+        if image_max_tokens and image_max_tokens > 0:
+            handler_kwargs["image_max_tokens"] = image_max_tokens
 
         _model = Llama(
             model_path=model_path,
             mmproj_path=mmproj_path,
             n_gpu_layers=-1,      # 全部层 offload 到 GPU
             n_ctx=n_ctx,
+            n_ubatch=n_ubatch,
             type_k=cache_type,
             type_v=cache_type,
             flash_attn=(DEVICE == "cuda"),
+            chat_handler_kwargs=handler_kwargs,
             verbose=False,
         )
         if "joycaption" in m["model"].lower():
@@ -428,6 +502,10 @@ def load_model(key, n_ctx=N_CTX, kv_cache="q8_0"):
         _state["model"] = key
         _state["n_ctx"] = n_ctx
         _state["kv_cache"] = kv_cache
+        _state["thinking"] = thinking
+        _state["image_max_tokens"] = image_max_tokens
+        _state["batch_max_tokens"] = batch_max_tokens
+        _state["n_ubatch"] = n_ubatch
         _state["status"] = "ready"
         print(f"[model] 就绪，耗时 {time.time() - t0:.1f}s")
     except Exception as e:
@@ -452,11 +530,16 @@ def unload_model():
         _state["model"] = None
         _state["n_ctx"] = None
         _state["kv_cache"] = None
+        _state["thinking"] = "auto"
+        _state["image_max_tokens"] = -1
+        _state["batch_max_tokens"] = 1024
+        _state["n_ubatch"] = 512
         print("[model] 已卸载，显存已释放")
         return True, "已卸载，显存已释放"
 
 
-def start_load(key, n_ctx=N_CTX, kv_cache="q8_0"):
+def start_load(key, n_ctx=N_CTX, kv_cache="q8_0", thinking="auto",
+               image_max_tokens=-1, batch_max_tokens=1024, n_ubatch=512):
     """后台线程重新加载模型。"""
     if _state["status"] in ("loading", "ready"):
         return False, f"当前状态为 {_state['status']}，无需加载"
@@ -467,7 +550,13 @@ def start_load(key, n_ctx=N_CTX, kv_cache="q8_0"):
         _state["error"] = None
         _state["n_ctx"] = n_ctx
         _state["kv_cache"] = kv_cache
-    threading.Thread(target=load_model, args=(key, n_ctx, kv_cache), daemon=True).start()
+        _state["thinking"] = thinking
+        _state["image_max_tokens"] = image_max_tokens
+        _state["batch_max_tokens"] = batch_max_tokens
+        _state["n_ubatch"] = n_ubatch
+    threading.Thread(target=load_model, args=(
+        key, n_ctx, kv_cache, thinking, image_max_tokens, batch_max_tokens, n_ubatch
+    ), daemon=True).start()
     return True, "开始加载模型"
 
 
@@ -479,14 +568,16 @@ def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int | None =
     if max_side and max(pil_img.size) > max_side:
         pil_img.thumbnail((max_side, max_side))  # 长边缩放，控制视觉 token 数量；max_side 为 None 表示原始尺寸
     buf = io.BytesIO()
-    pil_img.save(buf, format="PNG")
+    pil_img.save(buf, format="JPEG", quality=92)   # JPEG 比 PNG 编码快、base64 更小，视觉模型无差别
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
     messages = [
         {"role": "system", "content": _current_sys_prompt()},
         {"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            {"type": "text", "text": INSTRUCTIONS.get(lang, INSTRUCTION_ZH)},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            # 只保留最小的语言要求，具体写法完全由所选提示词预设决定
+            {"type": "text", "text": ("请用中文输出提示词。" if lang == "zh"
+                                      else "Write the prompt in English.")},
         ]},
     ]
     t0 = time.time()
@@ -592,13 +683,11 @@ def analyze_video_frames(frames, lang="zh", max_tokens=4096,
             previous_header = "前面分段的观察（仅用于保持连续性）："
         content.append({"type": "text", "text": previous_header + "\n" + previous_segments})
     for timestamp, image_data, _size in frames:
-        image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        # 抽帧时已存成 JPEG，直接复用原字节，避免重复解码 + PNG 重编码
+        b64 = base64.b64encode(image_data).decode("ascii")
         content.append({"type": "text", "text": f"Frame at {timestamp:.2f} seconds:"})
         content.append({"type": "image_url", "image_url": {
-            "url": f"data:image/png;base64,{b64}"
+            "url": f"data:image/jpeg;base64,{b64}"
         }})
 
     t0 = time.time()
@@ -727,6 +816,11 @@ PAGE = r"""<!doctype html>
                           gap:14px 16px; margin-top:14px; padding:4px 0;
                           align-items:center; justify-items:center; }
   .video-settings-table.cols-3 { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+  .video-settings-table.cols-6 { grid-template-columns:repeat(6, minmax(0, 1fr)); }
+  .load-settings { margin-top:2px; gap:10px 12px; }
+  .load-settings-hint { margin:0 0 14px; text-align:center; font-size:12px; color:var(--muted); }
+  .video-setting.is-disabled { opacity:.55; }
+  .video-setting-title[title] { cursor:help; text-decoration:underline dotted; text-underline-offset:3px; }
   .video-setting { display:flex; flex-direction:column; align-items:center; justify-content:center;
                    gap:6px; min-width:0; width:100%; color:var(--muted); font-size:13px;
                    text-align:center; }
@@ -763,11 +857,13 @@ PAGE = r"""<!doctype html>
   .segment-text { font-size:13px; line-height:1.5; white-space:pre-wrap; }
   @media (max-width:900px) {
     .video-settings-table { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+    .video-settings-table.cols-6 { grid-template-columns:repeat(3, minmax(0, 1fr)); }
   }
   @media (max-width:620px) {
     body { padding:16px; }
     .video-settings-table { grid-template-columns:repeat(2, minmax(0, 1fr)); }
-    .video-settings-table.cols-3 { grid-template-columns:repeat(1, minmax(0, 1fr)); }
+    .video-settings-table.cols-3,
+    .video-settings-table.cols-6 { grid-template-columns:repeat(1, minmax(0, 1fr)); }
   }
   #badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px;
            background:var(--btn); color:var(--muted); margin-left:8px; }
@@ -779,6 +875,20 @@ PAGE = r"""<!doctype html>
           color:var(--muted); cursor:pointer; transition:.15s; }
   #drop.over { border-color:#6ea8fe; background:var(--card); }
   #drop b { color:var(--text); }
+  .staged-wrap { margin-top:12px; }
+  .staged-list { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  .staged-item { position:relative; width:92px; height:92px; flex:none; }
+  .staged-item img { width:100%; height:100%; object-fit:cover; border-radius:8px;
+                     border:1px solid var(--btn-border); cursor:zoom-in; display:block; }
+  .staged-item .remove { position:absolute; top:-6px; right:-6px; width:22px; height:22px;
+                         padding:0; border-radius:50%; border:0; background:#d9534f; color:#fff;
+                         font-size:14px; line-height:22px; cursor:pointer; opacity:0;
+                         transition:opacity .12s; }
+  .staged-item:hover .remove { opacity:1; }
+  .staged-more { width:92px; height:92px; flex:none; display:flex; align-items:center;
+                 justify-content:center; border-radius:8px; border:1px dashed var(--btn-border);
+                 color:var(--muted); font-size:15px; }
+  .staged-note { margin-top:6px; font-size:12px; color:var(--muted); }
   button { background:var(--btn); color:var(--btn-text); border:1px solid var(--btn-border);
            padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; white-space:nowrap; }
   button:hover { background:var(--btn-hover); }
@@ -791,7 +901,14 @@ PAGE = r"""<!doctype html>
   #stats { margin:14px 0 8px; font-size:13px; color:var(--muted); }
   .card { background:var(--card); border:1px solid var(--border); border-radius:12px;
           padding:12px; margin-top:12px; display:flex; gap:12px; }
-  .card img { width:120px; height:120px; object-fit:cover; border-radius:8px; flex:none; }
+  .card img { width:120px; height:120px; object-fit:cover; border-radius:8px; flex:none;
+              cursor:zoom-in; }
+  .img-preview { position:fixed; inset:0; z-index:200; background:rgba(0,0,0,.88);
+                 display:flex; align-items:center; justify-content:center; padding:24px;
+                 cursor:zoom-out; }
+  .img-preview[hidden] { display:none; }
+  .img-preview img { max-width:94vw; max-height:92vh; object-fit:contain; border-radius:8px;
+                     box-shadow:0 12px 48px rgba(0,0,0,.6); }
   .card .body { flex:1; min-width:0; display:flex; flex-direction:column; }
   .card .name { font-size:13px; color:var(--name); margin-bottom:6px;
                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -895,36 +1012,92 @@ PAGE = r"""<!doctype html>
     <span style="align-self:center;font-size:13px;color:var(--muted);">模型：
       <select id="modelSel" class="sel"></select>
     </span>
-    <span style="align-self:center;font-size:13px;color:var(--muted);">上下文长度：
-      <select id="ctxSel" class="sel" title="视频多帧分析建议使用较大上下文">
-        <option value="4096">4K</option>
-        <option value="8192">8K</option>
-        <option value="12288">12K</option>
-        <option value="16384">16K</option>
-        <option value="20480">20K</option>
-        <option value="24576">24K</option>
-        <option value="28672">28K</option>
-        <option value="32768" selected>32K</option>
-        <option value="49152">48K</option>
-        <option value="65536">64K</option>
-        <option value="98304">96K</option>
-        <option value="131072">128K</option>
-        <option value="262144">256K</option>
-      </select>
-    </span>
-    <span style="align-self:center;font-size:13px;color:var(--muted);">KV 缓存：
-      <select id="kvCacheSel" class="sel" title="Q8_0 可减少缓存显存占用，F16 兼容性更广">
-        <option value="q8_0" selected>Q8_0（8-bit，省显存）</option>
-        <option value="f16">F16（标准）</option>
-      </select>
-    </span>
   </div>
+
+  <div class="video-settings-table cols-6 load-settings" role="group" aria-label="模型加载参数">
+    <div class="video-setting">
+      <span class="video-setting-title" title="模型单次能记住的 token 总数。越大越能覆盖长视频/多帧，但更占显存。自动=32768（32K）。可直接输入 token 数。">上下文长度</span>
+      <div class="combo">
+        <input type="text" id="ctxCombo" class="sel" inputmode="numeric" autocomplete="off"
+               value="32768" placeholder="如 32768" aria-label="上下文长度（token）">
+        <div class="combo-list" id="ctxComboList" hidden>
+          <button type="button" data-value="4096">4K</button>
+          <button type="button" data-value="8192">8K</button>
+          <button type="button" data-value="12288">12K</button>
+          <button type="button" data-value="16384">16K</button>
+          <button type="button" data-value="20480">20K</button>
+          <button type="button" data-value="24576">24K</button>
+          <button type="button" data-value="28672">28K</button>
+          <button type="button" data-value="32768">32K</button>
+          <button type="button" data-value="49152">48K</button>
+          <button type="button" data-value="65536">64K</button>
+          <button type="button" data-value="98304">96K</button>
+          <button type="button" data-value="131072">128K</button>
+          <button type="button" data-value="262144">256K</button>
+        </div>
+      </div>
+    </div>
+    <label class="video-setting">
+      <span class="video-setting-title" title="注意力缓存的量化精度。Q4_0 最省显存，Q8_0 平衡，F16 最占显存；自动=Q8_0。">KV 缓存</span>
+      <select id="kvCacheSel" class="sel">
+        <option value="auto" selected>自动</option>
+        <option value="q4_0">Q4_0</option>
+        <option value="q8_0">Q8_0</option>
+        <option value="f16">F16</option>
+      </select>
+    </label>
+    <label class="video-setting" id="thinkSetting">
+      <span class="video-setting-title" title="开启后模型先生成推理过程再写提示词，更慢但更稳；自动=模型模板默认（当前 27B 默认开启）。不支持的模型不可选。">思考模式</span>
+      <select id="thinkMode" class="sel" disabled>
+        <option value="auto" selected>自动</option>
+        <option value="on">开启</option>
+        <option value="off">关闭</option>
+      </select>
+    </label>
+    <label class="video-setting">
+      <span class="video-setting-title" title="每张图片/每帧最多编码多少视觉 token。越低越快、越省显存，但画面细节会减少；自动=模型默认。">视觉 token 上限</span>
+      <select id="imgTokensSel" class="sel">
+        <option value="-1" selected>自动</option>
+        <option value="256">256</option>
+        <option value="384">384</option>
+        <option value="512">512</option>
+        <option value="768">768</option>
+        <option value="1024">1024</option>
+      </select>
+    </label>
+    <label class="video-setting">
+      <span class="video-setting-title" title="视觉编码一次处理的 token 批量。显存充足时调大可能更快；自动=1024。">视觉批大小</span>
+      <select id="imgBatchSel" class="sel">
+        <option value="auto" selected>自动</option>
+        <option value="512">512</option>
+        <option value="1024">1024</option>
+        <option value="2048">2048</option>
+        <option value="4096">4096</option>
+      </select>
+    </label>
+    <label class="video-setting">
+      <span class="video-setting-title" title="文本 prompt 的物理批大小。显存充足时调大可能加快预填充；自动=512。">Prompt 批大小</span>
+      <select id="ubatchSel" class="sel">
+        <option value="auto" selected>自动</option>
+        <option value="256">256</option>
+        <option value="512">512</option>
+        <option value="1024">1024</option>
+        <option value="2048">2048</option>
+      </select>
+    </label>
+  </div>
+  <div class="load-settings-hint">以上参数在“加载模型”时生效 · 鼠标悬停标题可查看说明</div>
 
   <section id="imagePanel" class="mode-panel">
   <div id="drop">将图片或文件夹拖到这里，或点击选择</div>
+  <div id="stagedWrap" class="staged-wrap" hidden>
+    <div class="staged-list" id="stagedList"></div>
+    <div class="staged-note" id="stagedNote"></div>
+  </div>
   <div class="btns">
     <button class="primary" id="pickFiles">选择图片（可多选）</button>
     <button id="pickDir">选择文件夹</button>
+    <button class="primary" id="startImage" disabled>开始反推</button>
     <button id="clear">清空列表</button>
   </div>
   <div class="video-settings-table cols-3" role="group" aria-label="图片反推参数">
@@ -1107,6 +1280,9 @@ PAGE = r"""<!doctype html>
     </div>
   </section>
 </div>
+<div id="imgPreview" class="img-preview" hidden>
+  <img id="imgPreviewImg" alt="图片预览">
+</div>
 <button class="theme-toggle" id="themeBtn">💡</button>
 
 <script>
@@ -1134,7 +1310,9 @@ PAGE = r"""<!doctype html>
 
 const EXT = /\.(jpe?g|png|webp|bmp|gif|tiff?)$/i;
 let items = [];      // {id, file, url, status, prompt}
+let staged = [];     // 上传后待反推：{id, file, url}，点击开始后移入 items
 let running = false;
+let imageStarted = false;   // 点击“开始反推”后才处理队列
 let doneCount = 0;
 let videoFileObj = null;
 let videoObjectUrl = null;
@@ -1143,8 +1321,37 @@ let videoProgressTimer = null;
 let videoDuration = 0;
 let videoSampleLimitExceeded = false;
 let modelReady = false;
+let modelCaps = {};
+let loadControlsLocked = false;
 const $ = id => document.getElementById(id);
 const listEl = $('list'), statsEl = $('stats'), dropEl = $('drop');
+
+// 思考开关只对模板支持 enable_thinking 的模型可用，其余置灰
+function updateLoadAvailability() {
+  const cap = modelCaps[$('modelSel').value] || {};
+  const supported = !!cap.supports_thinking;
+  const locked = loadControlsLocked;
+  const think = $('thinkMode');
+  if (!supported) {
+    if (think.dataset.unsupported !== '1') {
+      think.dataset.unsupported = '1';
+      think.innerHTML = '<option value="auto">该模型不支持</option>';
+    }
+  } else if (think.dataset.unsupported === '1') {
+    delete think.dataset.unsupported;
+    think.innerHTML = '<option value="auto">自动</option>'
+                    + '<option value="on">开启</option><option value="off">关闭</option>';
+  }
+  think.disabled = !supported || locked;
+  $('thinkSetting').classList.toggle('is-disabled', !supported || locked);
+  $('ctxCombo').disabled = locked;
+  $('kvCacheSel').disabled = locked;
+  $('imgTokensSel').disabled = locked;
+  $('imgBatchSel').disabled = locked;
+  $('ubatchSel').disabled = locked;
+  if (locked) $('ctxComboList').hidden = true;
+}
+$('modelSel').onchange = updateLoadAvailability;
 
 function setMode(mode) {
   const image = mode === 'image';
@@ -1167,6 +1374,7 @@ async function poll() {
       b.textContent = '模型就绪' + (s.vram != null ? ' · 显存 ' + s.vram + 'G · 空闲 ' + s.free + 'G' : '')
                     + (s.n_ctx ? ' · 上下文 ' + Math.round(s.n_ctx / 1024) + 'K' : '')
                     + (s.kv_cache ? ' · KV ' + s.kv_cache.toUpperCase() : '')
+                    + (s.thinking === 'on' ? ' · 思考开' : '')
                     + (s.model && $('modelSel').selectedOptions[0] ? '（' + $('modelSel').selectedOptions[0].text.split('（')[0] + '）' : '');
       b.className = 'ready'; b.title = '';
     } else if (s.status === 'error') {
@@ -1177,16 +1385,29 @@ async function poll() {
       b.textContent = '模型加载中…'; b.className = 'loading';
     }
     if (s.model) $('modelSel').value = s.model;
-    if (s.n_ctx) $('ctxSel').value = String(s.n_ctx);
-    if (s.kv_cache) $('kvCacheSel').value = s.kv_cache;
+    if (s.n_ctx) $('ctxCombo').value = String(s.n_ctx);
+    if (s.kv_cache) $('kvCacheSel').value = (s.kv_cache === 'q8_0' ? 'auto' : s.kv_cache);
+    if (s.status === 'ready') {
+      if (s.thinking && $('thinkMode').querySelector('option[value="' + s.thinking + '"]')) {
+        $('thinkMode').value = s.thinking;
+      }
+      if (s.image_max_tokens != null) $('imgTokensSel').value = String(s.image_max_tokens);
+      if (s.batch_max_tokens) {
+        $('imgBatchSel').value = (s.batch_max_tokens === 1024 ? 'auto' : String(s.batch_max_tokens));
+      }
+      if (s.n_ubatch) {
+        $('ubatchSel').value = (s.n_ubatch === 512 ? 'auto' : String(s.n_ubatch));
+      }
+    }
     const canConfigureModel = (s.status === 'unloaded' || s.status === 'error');
+    loadControlsLocked = !canConfigureModel;
     $('modelSel').disabled = !canConfigureModel;
-    $('ctxSel').disabled = !canConfigureModel;
-    $('kvCacheSel').disabled = !canConfigureModel;
+    updateLoadAvailability();
     $('btnLoad').disabled = (s.status === 'loading' || s.status === 'ready');
     $('btnUnload').disabled = (s.status !== 'ready' || videoRunning);
     modelReady = s.status === 'ready';
     syncVideoButton();
+    syncImageButton();
   } catch (e) {}
 }
 setInterval(poll, 1500); poll();
@@ -1196,12 +1417,15 @@ setInterval(poll, 1500); poll();
   try {
     const r = await fetch('/api/models'); const j = await r.json();
     const sel = $('modelSel'); sel.innerHTML = '';
+    modelCaps = j.models || {};
     for (const [k, m] of Object.entries(j.models)) {
       const o = document.createElement('option'); o.value = k; o.textContent = m.label;
       sel.appendChild(o);
     }
     if (j.current) sel.value = j.current; else sel.value = j.default;
     sel.disabled = (j.status !== 'unloaded' && j.status !== 'error');
+    loadControlsLocked = sel.disabled;
+    updateLoadAvailability();
   } catch (e) {}
 })();
 
@@ -1374,8 +1598,11 @@ $('promptClose').onclick = closePromptManager;
 $('promptDone').onclick = closePromptManager;
 $('presetMask').onclick = e => { if (e.target === $('presetMask')) closePromptManager(); };
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !$('presetMask').hidden) closePromptManager();
+  if (e.key !== 'Escape') return;
+  if (!$('imgPreview').hidden) { $('imgPreview').hidden = true; return; }
+  if (!$('presetMask').hidden) closePromptManager();
 });
+$('imgPreview').onclick = () => { $('imgPreview').hidden = true; };
 $('presetSave').onclick = async () => {
   const preset = selectedPromptPreset();
   if (!preset) return;
@@ -1436,8 +1663,15 @@ $('btnLoad').onclick = async () => {
   $('btnLoad').disabled = true;
   await fetch('/api/load', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: $('modelSel').value, n_ctx: Number($('ctxSel').value),
-                           kv_cache: $('kvCacheSel').value }) });
+    body: JSON.stringify({
+      model: $('modelSel').value,
+      n_ctx: Number($('ctxCombo').value) || 32768,
+      kv_cache: $('kvCacheSel').value,
+      enable_thinking: $('thinkMode').value,
+      image_max_tokens: Number($('imgTokensSel').value),
+      batch_max_tokens: $('imgBatchSel').value,
+      n_ubatch: $('ubatchSel').value,
+    }) });
   poll();
 };
 $('btnUnload').onclick = async () => {
@@ -1449,8 +1683,9 @@ $('btnUnload').onclick = async () => {
 };
 
 // 最大输出长度：输入框可直接输入任意正整数，点击/聚焦时展开预设列表
-function setupTokenCombo(inputId, listId, fallback) {
+function setupTokenCombo(inputId, listId, fallback, maxValue) {
   const input = $(inputId), list = $(listId);
+  const max = maxValue || 262144;
   const showAll = () => {
     for (const btn of list.children) btn.hidden = false;
     list.hidden = false;
@@ -1484,7 +1719,7 @@ function setupTokenCombo(inputId, listId, fallback) {
   input.addEventListener('blur', () => {
     setTimeout(() => { list.hidden = true; }, 120);
     const n = Math.floor(Number(input.value));
-    input.value = String(n > 0 ? n : fallback);   // 空值或 0 等非法值回退默认
+    input.value = String(n > 0 ? Math.min(n, max) : fallback);   // 空值/0 回退默认，超大值截断
   });
   list.addEventListener('mousedown', e => e.preventDefault());   // 保持输入框焦点
   list.addEventListener('click', e => {
@@ -1494,8 +1729,9 @@ function setupTokenCombo(inputId, listId, fallback) {
     list.hidden = true;
   });
 }
-setupTokenCombo('maxtCombo', 'maxtComboList', 1024);
-setupTokenCombo('videoMaxTokensCombo', 'videoMaxTokensComboList', 8192);
+setupTokenCombo('maxtCombo', 'maxtComboList', 1024, 32768);
+setupTokenCombo('videoMaxTokensCombo', 'videoMaxTokensComboList', 8192, 262144);
+setupTokenCombo('ctxCombo', 'ctxComboList', 32768, 262144);
 function currentMaxTokens() {
   const n = Math.floor(Number($('maxtCombo').value));
   return String(n > 0 ? n : 1024);   // 非法或非正数时回退默认 1024
@@ -1508,7 +1744,26 @@ function currentVideoMaxTokens() {
 // ---- 选择文件 ----
 $('pickFiles').onclick = () => $('fileInput').click();
 $('pickDir').onclick = () => $('dirInput').click();
-$('clear').onclick = () => { items = []; doneCount = 0; render(); updateStats(); };
+$('clear').onclick = () => {
+  for (const s of staged) URL.revokeObjectURL(s.url);
+  staged = []; items = []; doneCount = 0; imageStarted = false;
+  renderStaged(); render(); updateStats();
+};
+$('startImage').onclick = () => {
+  if (imageStarted || !modelReady) return;
+  // 把待反推的图片移入下方队列
+  for (const s of staged) {
+    items.push({ id: crypto.randomUUID(), file: s.file, url: s.url,
+                 status: 'pending', prompt: '' });
+  }
+  staged = [];
+  renderStaged();
+  if (!items.some(i => i.status === 'pending')) return;
+  imageStarted = true;
+  render(); updateStats();
+  syncImageButton();
+  pump();
+};
 $('fileInput').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
 // 文件夹模式：只取所选文件夹第一层的文件，不递归子目录（webkitRelativePath 形如 "文件夹/文件名"）
 $('dirInput').onchange = e => {
@@ -1547,10 +1802,40 @@ async function walkEntry(entry, out) {
 function addFiles(files) {
   for (const f of files) {
     if (!EXT.test(f.name)) continue;
-    items.push({ id: crypto.randomUUID(), file: f, url: URL.createObjectURL(f),
-                 status: 'pending', prompt: '' });
+    staged.push({ id: crypto.randomUUID(), file: f, url: URL.createObjectURL(f) });
   }
-  render(); updateStats(); pump();
+  renderStaged();   // 先显示在上传区下方，点击“开始反推”才进入队列
+}
+
+// 上传区下方的待反推图片：最多并排显示 4 张，悬停右上角叉号可取消
+function renderStaged() {
+  const wrap = $('stagedWrap'), row = $('stagedList'), note = $('stagedNote');
+  row.innerHTML = '';
+  if (!staged.length) { wrap.hidden = true; note.textContent = ''; syncImageButton(); return; }
+  wrap.hidden = false;
+  for (const s of staged.slice(0, 4)) {
+    const box = document.createElement('div'); box.className = 'staged-item';
+    const img = document.createElement('img');
+    img.src = s.url; img.alt = s.file.name; img.title = '点击放大预览';
+    img.onclick = () => { $('imgPreviewImg').src = s.url; $('imgPreview').hidden = false; };
+    const rm = document.createElement('button');
+    rm.type = 'button'; rm.className = 'remove'; rm.textContent = '×'; rm.title = '取消这张图片';
+    rm.onclick = () => {
+      URL.revokeObjectURL(s.url);
+      staged = staged.filter(x => x.id !== s.id);
+      renderStaged();
+    };
+    box.append(img, rm); row.appendChild(box);
+  }
+  if (staged.length > 4) {
+    const more = document.createElement('div'); more.className = 'staged-more';
+    more.textContent = '+' + (staged.length - 4);
+    row.appendChild(more);
+  }
+  note.textContent = staged.length > 4
+    ? `已选 ${staged.length} 张，仅显示前 4 张`
+    : `已选 ${staged.length} 张`;
+  syncImageButton();
 }
 
 // ---- 渲染 ----
@@ -1559,6 +1844,8 @@ function render() {
   for (const it of items) {
     const card = document.createElement('div'); card.className = 'card';
     const img = document.createElement('img'); img.src = it.url; card.appendChild(img);
+    img.title = '点击放大预览';
+    img.onclick = () => { $('imgPreviewImg').src = it.url; $('imgPreview').hidden = false; };
     const body = document.createElement('div'); body.className = 'body';
     const name = document.createElement('div'); name.className = 'name'; name.textContent = it.file.name;
     const pre = document.createElement('pre');
@@ -1575,8 +1862,11 @@ function render() {
     if (it.status === 'done') {
       const ops = document.createElement('div'); ops.className = 'ops';
       const cp = document.createElement('button'); cp.textContent = '复制提示词';
-      cp.onclick = () => { navigator.clipboard.writeText(it.prompt); cp.textContent = '已复制';
-                           setTimeout(() => cp.textContent = '复制提示词', 1200); };
+      cp.onclick = async () => {
+        const ok = await copyText(it.prompt);
+        cp.textContent = ok ? '已复制' : '复制失败';
+        setTimeout(() => cp.textContent = '复制提示词', 1200);
+      };
       ops.appendChild(cp); body.appendChild(ops);
     }
     card.appendChild(body); listEl.appendChild(card);
@@ -1586,17 +1876,49 @@ function updateStats() {
   const done = items.filter(i => i.status === 'done').length;
   const fail = items.filter(i => i.status === 'error').length;
   statsEl.textContent = items.length ? `共 ${items.length} 张 · 完成 ${done} · 失败 ${fail}` : '';
+  syncImageButton();
+}
+function syncImageButton() {
+  const btn = $('startImage');
+  if (!btn) return;
+  const pending = items.some(i => i.status === 'pending');
+  const hasWork = staged.length > 0 || pending;
+  btn.disabled = imageStarted || !hasWork || !modelReady;
+  btn.textContent = imageStarted ? '反推中…'
+    : (staged.length ? `开始反推（${staged.length}）` : '开始反推');
+  btn.title = !modelReady ? '请先加载模型' : (!hasWork ? '请先添加图片' : '');
 }
 function updateById(id, patch) {
   const it = items.find(i => i.id === id); if (!it) return;
   Object.assign(it, patch); render(); updateStats();
 }
 
+// 复制到剪贴板：优先 Clipboard API，iframe/非安全环境下回退 execCommand
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+
 // ---- 串行处理（模型一次处理一张） ----
 function pump() {
-  if (running) return;
+  if (running || !imageStarted) return;
   const next = items.find(i => i.status === 'pending');
-  if (!next) return;
+  if (!next) { imageStarted = false; syncImageButton(); return; }
   running = true;
   next.status = 'running'; render();
   const fd = new FormData(); fd.append('image', next.file, next.file.name);
@@ -1615,7 +1937,11 @@ function pump() {
     })
     .catch(e => updateById(next.id, { status: 'error',
                  error: e.name === 'AbortError' ? '请求超时(5分钟)' : String(e) }))
-    .finally(() => { clearTimeout(timer); running = false; pump(); });
+    .finally(() => {
+      clearTimeout(timer); running = false;
+      if (imageStarted && items.some(i => i.status === 'pending')) pump();
+      else { imageStarted = false; syncImageButton(); }
+    });
 }
 
 // ---- 视频反推 ----
@@ -1764,10 +2090,9 @@ function renderVideoSegments(segments) {
   }
 }
 $('videoCopy').onclick = async () => {
-  try {
-    await navigator.clipboard.writeText($('videoPrompt').textContent);
-    $('videoCopy').textContent = '已复制';
-  } catch (e) { setVideoStatus('复制失败，请手动选择结果文本', true); }
+  const ok = await copyText($('videoPrompt').textContent);
+  $('videoCopy').textContent = ok ? '已复制' : '复制失败';
+  if (!ok) setVideoStatus('复制失败，请手动选择结果文本', true);
   setTimeout(() => $('videoCopy').textContent = '复制提示词', 1200);
 };
 $('videoDownload').onclick = () => {
@@ -1821,22 +2146,60 @@ def api_models():
 def api_load():
     data = request.get_json(silent=True) or {}
     key = data.get("model") or next(iter(scan_models()), None)
-    try:
-        n_ctx = int(data.get("n_ctx", N_CTX))
-    except (TypeError, ValueError):
+    raw_ctx = data.get("n_ctx", "auto")
+    if isinstance(raw_ctx, str) and raw_ctx.strip().lower() == "auto":
         n_ctx = N_CTX
-    kv_cache = str(data.get("kv_cache", "q8_0")).lower()
-    if n_ctx not in VIDEO_CTX_OPTIONS:
-        return jsonify({"ok": False, "message": "不支持的上下文长度"}), 400
+    else:
+        try:
+            n_ctx = int(raw_ctx)
+        except (TypeError, ValueError):
+            n_ctx = N_CTX
+        n_ctx = max(1024, min(n_ctx, 262144))
+    kv_cache = str(data.get("kv_cache", "auto")).lower()
+    if kv_cache == "auto":
+        kv_cache = "q8_0"
+    raw_tokens = data.get("image_max_tokens", -1)
+    if isinstance(raw_tokens, str) and raw_tokens.strip().lower() == "auto":
+        raw_tokens = -1
+    try:
+        image_max_tokens = int(raw_tokens)
+    except (TypeError, ValueError):
+        image_max_tokens = -1
+    if image_max_tokens not in (-1, 256, 384, 512, 768, 1024):
+        image_max_tokens = -1
+    raw_batch = data.get("batch_max_tokens", "auto")
+    try:
+        batch_max_tokens = 1024 if str(raw_batch).lower() == "auto" else int(raw_batch)
+    except (TypeError, ValueError):
+        batch_max_tokens = 1024
+    if batch_max_tokens not in (512, 1024, 2048, 4096):
+        batch_max_tokens = 1024
+    raw_ubatch = data.get("n_ubatch", "auto")
+    try:
+        n_ubatch = 512 if str(raw_ubatch).lower() == "auto" else int(raw_ubatch)
+    except (TypeError, ValueError):
+        n_ubatch = 512
+    if n_ubatch not in (256, 512, 1024, 2048):
+        n_ubatch = 512
+    thinking = str(data.get("enable_thinking", "auto")).lower()
+    if thinking not in ("auto", "on", "off"):
+        thinking = "auto"
     if kv_cache not in KV_CACHE_OPTIONS:
         return jsonify({"ok": False, "message": "不支持的 KV 缓存类型"}), 400
-    if not key or key not in scan_models():
+    model = scan_models().get(key)
+    if not model:
         return jsonify({"ok": False, "message": f"未知模型: {key}"}), 400
-    if _state["status"] == "ready" and (
-            _state.get("model") != key or _state.get("n_ctx") != n_ctx
-            or _state.get("kv_cache") != kv_cache):
-        unload_model()  # 切换模型、上下文或 KV 缓存：先释放当前模型再加载新的
-    ok, msg = start_load(key, n_ctx, kv_cache)
+    if not model.get("supports_thinking"):
+        thinking = "auto"
+    current = (_state.get("model"), _state.get("n_ctx"), _state.get("kv_cache"),
+               _state.get("thinking"), _state.get("image_max_tokens"),
+               _state.get("batch_max_tokens"), _state.get("n_ubatch"))
+    target = (key, n_ctx, kv_cache, thinking,
+              image_max_tokens, batch_max_tokens, n_ubatch)
+    if _state["status"] == "ready" and current != target:
+        unload_model()  # 任一加载参数变化：先释放当前模型再加载新的
+    ok, msg = start_load(key, n_ctx, kv_cache, thinking,
+                         image_max_tokens, batch_max_tokens, n_ubatch)
     return jsonify({"ok": ok, "message": msg})
 
 
