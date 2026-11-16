@@ -1143,6 +1143,66 @@ def _load_tagger(model_id, model_cfg):
         _load_wd14(model_id, model_cfg)
 
 
+# girl 家族标签：锚点模糊匹配只认这四个（2girls/3girls/4girls 与 1girl 同级，
+# 排序规则本就归在同一组），其余含 girl 的标签不会被锚点 girl 匹配到
+GIRL_FAMILY = ("1girl", "2girls", "3girls", "4girls")
+
+
+def _tag_norm(s):
+    """标签归一化：去转义括号、转小写、下划线→空格、折叠空白。
+    忽略标签 / 去重 / 锚点比对统一用它。"""
+    s = s.replace("\\(", "(").replace("\\)", ")").strip().lower()
+    return " ".join(s.replace("_", " ").split())
+
+
+def _kept_prefix_tags(txt, anchor):
+    """已有标签文件中，锚点标签之前的所有标签（原样保留，不重排）。
+
+    按逗号切分后逐个比对；忽略大小写、转义括号与下划线/空格差异
+    （如锚点 long_hair 可匹配 long hair）。找不到锚点时返回空字符串。
+    girl 家族特例：锚点为 girl（或 1girl/2girls/3girls/4girls）而精确匹配失败时，
+    从头匹配第一个 GIRL_FAMILY 标签（如已有 txt 只有 2girls 也能匹配上）。"""
+    try:
+        with open(txt, "r", encoding="utf-8") as f:
+            tags = f.read().split(",")
+    except Exception:
+        return ""
+
+    target = _tag_norm(anchor)
+    if not target:
+        return ""
+    girls = [_tag_norm(t) in GIRL_FAMILY for t in tags]   # girl 家族标记
+    fuzzy = target == "girl" or target in GIRL_FAMILY
+    for i, t in enumerate(tags):
+        if _tag_norm(t) == target:
+            kept = [x.strip() for x in tags[:i] if x.strip()]
+            return ", ".join(kept)
+    if fuzzy:   # 精确匹配失败：从头找第一个 girl 家族标签
+        for i, g in enumerate(girls):
+            if g:
+                kept = [x.strip() for x in tags[:i] if x.strip()]
+                return ", ".join(kept)
+    return ""
+
+
+def _dedup_tags(text):
+    """按逗号切分最终文本，去掉重复标签（保留首个出现的写法）。
+
+    比对时忽略大小写、转义括号与下划线/空格差异（如 long_hair 与 long hair 视为重复），
+    但保留每个标签原本的写法与出现位置，其余顺序不变。"""
+    seen, out = set(), []
+    for t in text.split(","):
+        t = t.strip()
+        if not t:
+            continue
+        key = _tag_norm(t)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return ", ".join(out)
+
+
 def _run_job(cfg, model_cfg):
     global _job
     folder = cfg["folder"]
@@ -1152,6 +1212,13 @@ def _run_job(cfg, model_cfg):
     prefix, suffix = cfg.get("prefix", ""), cfg.get("suffix", "")
     skip = cfg.get("skip_existing", False)
     spaces = bool(cfg.get("spaces", False)) and mode == "tag"
+    keep_anchor = (cfg.get("keep_anchor") or "").strip()
+    if mode != "tag":
+        keep_anchor = ""   # 锚点保留仅用于标签打标模式
+    ignore = set()
+    if mode == "tag":
+        ignore = {_tag_norm(t) for t in (cfg.get("ignore_tags") or "").split(",")
+                  if _tag_norm(t)}
     freq = {}   # 标签出现次数（标签打标模式统计）
 
     try:
@@ -1190,6 +1257,8 @@ def _run_job(cfg, model_cfg):
                     _job["done"] += 1
                 continue
             try:
+                # 保留锚点前的旧标签（仅标签打标模式；锚点不存在则不保留）
+                kept = _kept_prefix_tags(txt, keep_anchor) if keep_anchor else ""
                 with Image.open(path) as im:
                     im.load()
                     if mode == "tag":
@@ -1208,9 +1277,9 @@ def _run_job(cfg, model_cfg):
                             [t for t, _ in general])
                         if spaces:
                             raw = [t.replace("_", " ") for t in raw]
+                        if ignore:
+                            raw = [t for t in raw if _tag_norm(t) not in ignore]
                         body = ", ".join([_escape_tag(t) for t in raw])
-                        for t in raw:
-                            freq[t] = freq.get(t, 0) + 1
                     else:
                         body, _nl_stats = _nl_interrogate(
                             model, im, cfg.get("nl_prompt", ""),
@@ -1218,7 +1287,17 @@ def _run_job(cfg, model_cfg):
                             n_ctx=cfg.get("n_ctx", 8192),
                             max_tokens=cfg.get("maxt", 512),
                             should_cancel=lambda: _job["cancel"])
+                if kept:
+                    # 保留标签位于前缀追加之后、角色/作品等新结果之前
+                    body = kept + (", " + body if body else "")
                 text = _append_prompts(prefix, suffix, body)
+                if mode == "tag":
+                    text = _dedup_tags(text)
+                    # 标签统计以最终写入内容为准（含保留标签、前缀/后缀追加，去重后）
+                    for t in text.split(","):
+                        t = t.replace("\\(", "(").replace("\\)", ")").strip()
+                        if t:
+                            freq[t] = freq.get(t, 0) + 1
                 with open(txt, "w", encoding="utf-8") as f:
                     f.write(text)
                 with _job_lock:
@@ -1278,6 +1357,8 @@ def start_job(cfg):
         cfg["nl_res"] = int(cfg.get("nl_res", 1536))
         cfg["maxt"] = min(4096, max(32, int(cfg.get("maxt", 512))))
         cfg["spaces"] = bool(cfg.get("spaces", False))
+        cfg["keep_anchor"] = (cfg.get("keep_anchor") or "").strip()
+        cfg["ignore_tags"] = (cfg.get("ignore_tags") or "").strip()
     except (TypeError, ValueError):
         return False, "阈值或参数必须是数字"
     _last_cfg = dict(cfg)
@@ -1718,6 +1799,25 @@ PAGE = r"""<!doctype html>
       <label id="spacesLabel" style="font-size:13px; display:flex; align-items:center; gap:6px;">
         <input type="checkbox" id="spaces_opt"> 空格代替下划线
       </label>
+    </div>
+
+    <div class="row" id="ignoreRow">
+      <div style="flex:1; display:flex; align-items:center; gap:6px; min-width:0;">
+        <label id="keepLabel" style="font-size:13px; display:flex; align-items:center; gap:6px; white-space:nowrap;">
+          <input type="checkbox" id="keep_existing"> 保留锚点前标签
+        </label>
+        <input type="text" id="keep_anchor" placeholder="锚点标签，如 girl / 1girl"
+               style="flex:1; min-width:0; display:none">
+      </div>
+      <div style="flex:1; display:flex; align-items:center; gap:6px; min-width:0;">
+        <label id="ignoreLabel" class="lab" style="width:auto; white-space:nowrap;">忽略标签</label>
+        <input type="text" id="ignore_tags" placeholder="要去除的标签，如 3d, render（逗号分隔）"
+               style="flex:1; min-width:0">
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="lab"></label>
       <button class="plain" onclick="preview()">扫描</button>
       <button id="runBtn" onclick="run()">开始打标</button>
       <button class="plain" id="cancelBtn" onclick="cancel()" style="display:none">停止</button>
@@ -1726,7 +1826,14 @@ PAGE = r"""<!doctype html>
 
     <div class="tip">结果写入图片同名的 .txt 文件（UTF-8）。角色模型与标签模型相同则一次推理同时出角色和普通标签；
     不同则先用角色模型识别角色（角色阈值）、再用标签模型识别普通标签（标签阈值）后拼接。
-    输出"角色标签在前、普通标签在后"，括号会被转义；评分（rating）标签不写入。</div>
+    输出"角色标签在前、普通标签在后"，括号会被转义；评分（rating）标签不写入。
+    勾选"保留锚点前标签"时：已有 txt 会先按锚点标签（如 girl / 1girl）切开，锚点之前的标签原样保留，
+    新打标结果接在其后（顺序：前缀追加 → 保留标签 → 角色 → 作品 → girl/solo/look → 其余 → 后缀追加）；
+    锚点 girl 及 girl 家族（1girl/2girls/3girls/4girls）精确匹配失败时从头匹配第一个家族标签，其余含 girl 的标签不会误匹配；
+    锚点在已有 txt 中完全找不到时不保留任何旧标签，直接覆盖。
+    填写"忽略标签"（逗号分隔，如 3d, render）会把生成的结果中对应标签去掉（忽略大小写与下划线/空格差异），
+    保留的旧标签和前缀/后缀不受影响。
+    写入前自动去重：排序完成后重复的标签只保留最早出现的那个（忽略大小写与下划线/空格差异）。</div>
 
     <div id="jobbox" style="display:none">
       <div id="bar"><div id="barfill"></div></div>
@@ -1923,7 +2030,17 @@ $('mode').onchange = () => {
     $('tagRow').style.display = nl ? 'none' : '';
     $('nlRow').style.display = nl ? '' : 'none';
     $('spacesLabel').style.display = nl ? 'none' : '';
+    $('keepLabel').style.display = nl ? 'none' : '';
+    $('ignoreRow').style.display = nl ? 'none' : '';
+    $('ignoreLabel').style.display = nl ? 'none' : '';
+    $('ignore_tags').style.display = nl ? 'none' : '';
+    $('keep_anchor').style.display = (nl || !$('keep_existing').checked) ? 'none' : '';
+    if (nl) $('keep_existing').checked = false;
     renderModels();
+};
+$('keep_existing').onchange = () => {
+    $('keep_anchor').style.display = $('keep_existing').checked ? '' : 'none';
+    if ($('keep_existing').checked) $('keep_anchor').focus();
 };
 
 // 切换模型时自动填入该模型的推荐阈值（WD14: 0.35/0.85，CL: 见各模型定义）；
@@ -2266,7 +2383,9 @@ function args() {
         prefix: $('prefix').value,
         suffix: $('suffix').value,
         skip_existing: $('skip_existing').checked,
-        spaces: $('spaces_opt').checked
+        spaces: $('spaces_opt').checked,
+        keep_anchor: $('keep_existing').checked ? $('keep_anchor').value.trim() : '',
+        ignore_tags: $('ignore_tags').value
     };
 }
 
