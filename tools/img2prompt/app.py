@@ -30,8 +30,9 @@ MODEL_DIR = os.path.join(ROOT_DIR, "model")
 SYS_FILE = os.path.join(BASE_DIR, "system_prompt.json")   # 系统提示词持久化
 PORT = 7867
 MAX_NEW_TOKENS = 512
-N_CTX = 16384                # 默认上下文长度，兼顾 27B 模型显存占用
-VIDEO_CTX_OPTIONS = set(range(4096, 32769, 4096))
+N_CTX = 32768                # 默认上下文长度
+VIDEO_CTX_OPTIONS = ({4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768,
+                      49152, 65536, 98304, 131072, 262144})
 DEFAULT_RES = 1536           # 默认图像长边上限：768 快 / 1024 均衡 / 1536 高清
 VIDEO_MAX_FPS = 30
 VIDEO_MAX_SAMPLES = 600
@@ -151,23 +152,16 @@ INSTRUCTION_EN = (
 INSTRUCTIONS = {"zh": INSTRUCTION_ZH, "en": INSTRUCTION_EN}
 
 VIDEO_SYS_PROMPT = (
-    "You are a precise multimodal video analyst. Infer the visible action and temporal progression "
-    "from the supplied video frames, then follow the user's instructions to write a useful "
-    "text-to-video generation prompt. Do not invent details that are not visible."
-)
-VIDEO_INSTRUCTION_ZH = (
-    "按时间顺序分析这段视频抽取出的画面，并写成可用于视频生成模型的中文提示词。"
+    "按时间顺序分析这段视频抽取出的画面，并写成可用于视频生成模型的提示词。"
     "描述主体、场景、连续动作与动作变化、镜头运动、构图、光线、色彩和视觉风格；"
     "保持主体与环境在各帧之间的一致性。只写画面可见的信息，不推测声音或不可见内容。"
-    "用连贯的一段文字输出最终提示词，不要写分析过程、时间戳、标题或列表。"
+    "用连贯的文字输出最终提示词，不要写分析过程、时间戳、标题或列表。"
 )
-VIDEO_INSTRUCTION_EN = (
-    "Analyze the supplied video frames in chronological order and write one text-to-video prompt. "
-    "Describe the subject, setting, continuous action and its progression, camera movement, "
-    "composition, lighting, colors, and visual style while keeping subjects and surroundings "
-    "consistent across frames. Include only visible information; do not infer audio or unseen events. "
-    "Output one coherent paragraph containing only the final prompt, with no analysis, timestamps, "
-    "heading, or list."
+# 最终整合阶段的默认提示词（每个视频预设各自保存一份）
+VIDEO_DEFAULT_FINAL = (
+    "将这些按时间顺序排列的分段描述整合为一条连贯的视频生成提示词。保留动作和镜头变化的先后顺序，"
+    "保持主体与场景一致，删去重复内容，只保留分段描述支持的细节。最终只输出一段流畅的提示词，"
+    "不要添加前言或解释。"
 )
 VIDEO_BUILTIN_PRESETS = {
     "默认提示词": VIDEO_SYS_PROMPT,
@@ -231,9 +225,10 @@ BUILTIN_PRESETS = {          # 出厂方案（"恢复默认"按方案名还原�
 }
 _prompt_presets = dict(BUILTIN_PRESETS)   # {方案名: 系统提示词内容}
 _prompt_current = "默认人设"
-_video_presets = dict(VIDEO_BUILTIN_PRESETS)
+_video_presets = {}
 _video_prompt_current = VIDEO_DEFAULT_PRESET
 _video_sys_prompt = VIDEO_SYS_PROMPT
+_video_final_instruction = VIDEO_DEFAULT_FINAL
 
 
 def _load_presets():
@@ -277,16 +272,38 @@ def _current_sys_prompt():
     return _prompt_presets.get(_prompt_current, DEFAULT_SYS_PROMPT)
 
 
+def _normalize_video_preset(value):
+    """视频预设统一为 {system, final}：system=分段提示词，final=最终提示词。"""
+    if isinstance(value, str):
+        system = value.strip()
+        return {"system": system or VIDEO_SYS_PROMPT, "final": VIDEO_DEFAULT_FINAL}
+    if isinstance(value, dict):
+        system = str(value.get("system") or value.get("prompt") or "").strip()
+        final = str(value.get("final") or "").strip()
+        return {"system": system or VIDEO_SYS_PROMPT,
+                "final": final or VIDEO_DEFAULT_FINAL}
+    return {"system": VIDEO_SYS_PROMPT, "final": VIDEO_DEFAULT_FINAL}
+
+
+def _apply_video_preset():
+    """把当前视频预设的两部分同步到实际推理使用的全局变量。"""
+    global _video_sys_prompt, _video_final_instruction
+    preset = _video_presets.get(_video_prompt_current) or _normalize_video_preset(None)
+    _video_sys_prompt = preset["system"]
+    _video_final_instruction = preset["final"]
+
+
 def _load_video_presets():
-    global _video_presets, _video_prompt_current, _video_sys_prompt
-    _video_presets = dict(VIDEO_BUILTIN_PRESETS)
+    global _video_presets, _video_prompt_current
+    _video_presets = {name: _normalize_video_preset(value)
+                      for name, value in VIDEO_BUILTIN_PRESETS.items()}
     _video_prompt_current = VIDEO_DEFAULT_PRESET
     try:
         with open(VIDEO_PROMPT_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         saved_presets = data.get("presets")
         if isinstance(saved_presets, dict):
-            cleaned = {str(k).strip(): str(v)
+            cleaned = {str(k).strip(): _normalize_video_preset(v)
                        for k, v in saved_presets.items() if str(k).strip()}
             if cleaned:
                 _video_presets = cleaned
@@ -296,12 +313,12 @@ def _load_video_presets():
         else:
             prompt = data.get("prompt")
             if isinstance(prompt, str) and prompt.strip():
-                _video_presets[VIDEO_DEFAULT_PRESET] = prompt.strip()
+                _video_presets[VIDEO_DEFAULT_PRESET] = _normalize_video_preset(prompt.strip())
     except FileNotFoundError:
         pass
     except Exception as e:
         print(f"[video] 读取提示词方案失败: {e}")
-    _video_sys_prompt = _video_presets.get(_video_prompt_current, VIDEO_SYS_PROMPT)
+    _apply_video_preset()
 
 
 def _save_video_presets():
@@ -316,12 +333,13 @@ def _save_video_presets():
 
 
 def _save_video_sys_prompt(prompt):
-    global _video_sys_prompt, _video_presets
+    global _video_presets
     prompt = str(prompt or "").strip()
     if not prompt:
         return False
-    _video_presets[_video_prompt_current] = prompt
-    _video_sys_prompt = prompt
+    preset = _video_presets.setdefault(_video_prompt_current, _normalize_video_preset(None))
+    preset["system"] = prompt
+    _apply_video_preset()
     return _save_video_presets()
 
 
@@ -455,11 +473,11 @@ def start_load(key, n_ctx=N_CTX, kv_cache="q8_0"):
 
 # ---------------------------------------------------------------- 推理 ---
 
-def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int = DEFAULT_RES,
+def analyze_image(pil_img: Image.Image, lang: str = "zh", max_side: int | None = DEFAULT_RES,
                   max_tokens: int = MAX_NEW_TOKENS) -> str:
     pil_img = pil_img.convert("RGB")
-    if max(pil_img.size) > max_side:
-        pil_img.thumbnail((max_side, max_side))  # 长边缩放，控制视觉 token 数量
+    if max_side and max(pil_img.size) > max_side:
+        pil_img.thumbnail((max_side, max_side))  # 长边缩放，控制视觉 token 数量；max_side 为 None 表示原始尺寸
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -525,7 +543,8 @@ def extract_video_frames(video_path, sample_fps, max_side):
             if index not in target_set:
                 continue
             image = Image.frombytes("RGB", (width, height), raw)
-            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            if max_side:
+                image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=88)
             extracted.append((index / fps, buffer.getvalue(), image.size))
@@ -536,7 +555,8 @@ def extract_video_frames(video_path, sample_fps, max_side):
             raise ValueError("视频中没有可读取的画面")
         if len(extracted) < len(targets):
             image = Image.frombytes("RGB", (width, height), last_frame)
-            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            if max_side:
+                image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=88)
             extracted.append((min(duration, last_index / fps), buffer.getvalue(), image.size))
@@ -552,20 +572,18 @@ def analyze_video_frames(frames, lang="zh", max_tokens=4096,
         if lang == "en":
             opening = (f"This is segment {idx} of {total}, covering {start:.2f} to "
                        f"{end:.2f} seconds of the video. Analyze its frames in order.")
-            instruction = VIDEO_INSTRUCTION_EN + (
-                " Describe this segment only, with enough concrete action and visual details "
-                "to combine it with the other segments later."
-            )
         else:
             opening = (f"这是视频第 {idx}/{total} 段，时间范围 {start:.2f}–{end:.2f} 秒。"
                        "请按顺序分析本段画面。")
-            instruction = VIDEO_INSTRUCTION_ZH + (
-                "只描述本段内容，保留足够具体的动作与视觉细节，以便之后与其他分段合并。"
-            )
     else:
-        opening = (f"Analyze {len(frames)} frames sampled from this video in chronological order. "
-                   "Each timestamp is relative to the start of the video.")
-        instruction = VIDEO_INSTRUCTION_EN if lang == "en" else VIDEO_INSTRUCTION_ZH
+        if lang == "en":
+            opening = (f"Analyze {len(frames)} frames sampled from this video in chronological order. "
+                       "Each timestamp is relative to the start of the video.")
+        else:
+            opening = (f"这是从视频中按时间顺序抽取的 {len(frames)} 帧画面，"
+                       "时间戳相对视频开头。")
+    # 只保留最小的语言要求（输出语言由面板选择），不再追加完整 user 指令
+    opening += " Write the prompt in English." if lang == "en" else "请用中文输出提示词。"
     content = [{"type": "text", "text": opening}]
     if previous_segments:
         if lang == "en":
@@ -582,7 +600,6 @@ def analyze_video_frames(frames, lang="zh", max_tokens=4096,
         content.append({"type": "image_url", "image_url": {
             "url": f"data:image/png;base64,{b64}"
         }})
-    content.append({"type": "text", "text": instruction})
 
     t0 = time.time()
     resp = _model.create_chat_completion(
@@ -608,27 +625,20 @@ def analyze_video_frames(frames, lang="zh", max_tokens=4096,
 
 def synthesize_video_prompt(segments, lang="zh", max_tokens=4096):
     if lang == "en":
-        instruction = (
-            "Combine the chronological segment descriptions into one coherent text-to-video prompt. "
-            "Preserve the order of actions and camera changes, maintain subject and scene continuity, "
-            "remove repetition, and include only details supported by the descriptions. Output only "
-            "one fluent paragraph with no preface or explanation."
-        )
         header = "Chronological segment descriptions:"
     else:
-        instruction = (
-            "将这些按时间顺序排列的分段描述整合为一条连贯的视频生成提示词。保留动作和镜头变化的先后顺序，"
-            "保持主体与场景一致，删去重复内容，只保留分段描述支持的细节。最终只输出一段流畅的提示词，"
-            "不要添加前言或解释。"
-        )
         header = "按时间顺序排列的分段描述："
+    instruction = _video_final_instruction   # 随视频预设保存，可在提示词管理里编辑
     content = [{"type": "text", "text": header}]
     for segment in segments:
         content.append({"type": "text", "text": (
             f"Segment {segment['index']} ({segment['start']:.2f}-{segment['end']:.2f}s): "
             f"{segment['prompt']}"
         )})
-    content.append({"type": "text", "text": instruction})
+    content.append({"type": "text", "text": (
+        instruction + (" Write the final prompt in English."
+                       if lang == "en" else "请用中文输出最终提示词。")
+    )})
     t0 = time.time()
     resp = _model.create_chat_completion(
         messages=[
@@ -726,6 +736,16 @@ PAGE = r"""<!doctype html>
   .segment-setting.is-disabled .video-setting-title,
   .segment-setting.is-disabled .video-stepper span { color:var(--muted); opacity:.55; }
   .video-setting .sel, .video-setting input { width:100%; min-width:0; height:36px; }
+  .combo { position:relative; width:100%; }
+  .combo-list { position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:60;
+                background:var(--card); border:1px solid var(--border); border-radius:8px;
+                box-shadow:0 8px 20px rgba(0,0,0,.25); padding:4px; max-height:220px; overflow:auto; }
+  .combo-list[hidden] { display:none; }
+  .combo-list button { display:block; width:100%; height:auto; min-height:0; padding:7px 10px;
+                       border:0; border-radius:6px; background:transparent; color:var(--text);
+                       font:inherit; text-align:left; cursor:pointer; }
+  .combo-list button:hover, .combo-list button:focus { background:var(--btn-hover); }
+  .combo-list button[hidden] { display:none; }
   .video-setting .segment-toggle input { width:auto; height:auto; }
   .video-stepper { display:flex; align-items:center; gap:8px; }
   .video-stepper input { max-width:110px; }
@@ -837,6 +857,13 @@ PAGE = r"""<!doctype html>
   .prompt-editor-actions .right { display:flex; gap:8px; margin-left:auto; }
   .prompt-editor-actions button { padding:7px 12px; }
   .prompt-editor-actions button:disabled { opacity:.45; cursor:not-allowed; }
+  .editor-label { flex:none; color:var(--muted); font-size:12px; }
+  .editor-label[hidden] { display:none; }
+  #finalPromptEditor { flex:none; height:110px; width:100%; resize:vertical; box-sizing:border-box;
+                       background:var(--inner); color:var(--text); border:1px solid var(--btn-border);
+                       border-radius:6px; padding:12px; font-family:inherit; font-size:13px;
+                       line-height:1.55; }
+  #finalPromptEditor[hidden] { display:none; }
   @media (max-width:700px) {
     .pmodal { width:96vw; height:92vh; padding:14px; }
     .prompt-assignments { grid-template-columns:1fr; gap:8px; }
@@ -873,11 +900,16 @@ PAGE = r"""<!doctype html>
         <option value="4096">4K</option>
         <option value="8192">8K</option>
         <option value="12288">12K</option>
-        <option value="16384" selected>16K</option>
+        <option value="16384">16K</option>
         <option value="20480">20K</option>
         <option value="24576">24K</option>
         <option value="28672">28K</option>
-        <option value="32768">32K</option>
+        <option value="32768" selected>32K</option>
+        <option value="49152">48K</option>
+        <option value="65536">64K</option>
+        <option value="98304">96K</option>
+        <option value="131072">128K</option>
+        <option value="262144">256K</option>
       </select>
     </span>
     <span style="align-self:center;font-size:13px;color:var(--muted);">KV 缓存：
@@ -898,20 +930,25 @@ PAGE = r"""<!doctype html>
   <div class="video-settings-table cols-3" role="group" aria-label="图片反推参数">
     <label class="video-setting"><span class="video-setting-title">最长边分辨率</span>
       <select id="resSel" class="sel">
+        <option value="orig">原始尺寸（不缩放）</option>
         <option value="768">768（快速）</option>
         <option value="1024">1024（均衡）</option>
         <option value="1536" selected>1536（高清）</option>
       </select>
     </label>
-    <label class="video-setting"><span class="video-setting-title">最大输出长度</span>
-      <select id="maxtSel" class="sel">
-        <option value="512">512</option>
-        <option value="768">768</option>
-        <option value="1024" selected>1024</option>
-        <option value="1536">1536</option>
-        <option value="2048">2048</option>
-      </select>
-    </label>
+    <div class="video-setting"><span class="video-setting-title">最大输出长度</span>
+      <div class="combo">
+        <input type="text" id="maxtCombo" class="sel" inputmode="numeric" autocomplete="off"
+               value="1024" placeholder="选择或输入正整数" aria-label="最大输出长度（大于 0）">
+        <div class="combo-list" id="maxtComboList" hidden>
+          <button type="button" data-value="512">512</button>
+          <button type="button" data-value="1024">1024</button>
+          <button type="button" data-value="2048">2048</button>
+          <button type="button" data-value="4096">4096</button>
+          <button type="button" data-value="8192">8192</button>
+        </div>
+      </div>
+    </div>
     <label class="video-setting"><span class="video-setting-title">提示词语言</span>
       <select id="langSel" class="sel">
         <option value="zh" selected>中文</option>
@@ -958,29 +995,37 @@ PAGE = r"""<!doctype html>
           </label>
         </div>
         <span class="video-stepper">
-          <input type="number" id="framesPerSegment" class="sel" min="1" max="60" step="1" value="8">
+          <input type="number" id="framesPerSegment" class="sel" min="1" max="60" step="1" value="9">
           <span>帧/段</span>
         </span>
       </div>
       <label class="video-setting"><span class="video-setting-title">采样帧率（每秒帧数）</span>
         <span class="video-stepper">
-          <input type="number" id="videoFps" class="sel" min="1" max="30" step="1" value="1">
+          <input type="number" id="videoFps" class="sel" min="1" max="30" step="1" value="3">
           <span>FPS</span>
         </span>
       </label>
       <label class="video-setting"><span class="video-setting-title">最长边分辨率</span>
         <select id="videoRes" class="sel">
+          <option value="orig">原始尺寸（不缩放）</option>
           <option value="512">512</option><option value="768" selected>768</option>
           <option value="1024">1024</option><option value="1536">1536</option>
         </select>
       </label>
-      <label class="video-setting"><span class="video-setting-title">最大输出长度</span>
-        <select id="videoMaxTokens" class="sel">
-          <option value="512">512</option><option value="1024">1024</option>
-          <option value="2048">2048</option><option value="4096" selected>4096</option>
-          <option value="6144">6144</option><option value="8192">8192</option>
-        </select>
-      </label>
+      <div class="video-setting"><span class="video-setting-title">最大输出长度</span>
+        <div class="combo">
+          <input type="text" id="videoMaxTokensCombo" class="sel" inputmode="numeric" autocomplete="off"
+                 value="8192" placeholder="选择或输入正整数" aria-label="最大输出长度（大于 0）">
+          <div class="combo-list" id="videoMaxTokensComboList" hidden>
+            <button type="button" data-value="512">512</button>
+            <button type="button" data-value="1024">1024</button>
+            <button type="button" data-value="2048">2048</button>
+            <button type="button" data-value="4096">4096</button>
+            <button type="button" data-value="8192">8192</button>
+            <button type="button" data-value="16384">16384</button>
+          </div>
+        </div>
+      </div>
       <label class="video-setting"><span class="video-setting-title">提示词语言</span>
         <select id="videoLang" class="sel">
           <option value="zh" selected>中文</option><option value="en">English</option>
@@ -992,6 +1037,7 @@ PAGE = r"""<!doctype html>
     <div id="videoResult" class="card">
       <div class="body">
         <div id="videoStats" class="status"></div>
+        <div id="videoFinalStats" class="status" hidden></div>
         <pre id="videoPrompt"></pre>
         <div class="ops">
           <button id="videoCopy">复制提示词</button>
@@ -1045,7 +1091,10 @@ PAGE = r"""<!doctype html>
           <span id="presetEditingName">选择一个预设</span>
           <button id="presetDelete" title="删除所选预设">删除预设</button>
         </div>
-        <textarea id="promptEditor" spellcheck="false" aria-label="系统提示词内容"></textarea>
+        <div class="editor-label" id="promptEditorLabel">系统提示词</div>
+        <textarea id="promptEditor" spellcheck="false" aria-label="提示词内容"></textarea>
+        <div class="editor-label" id="finalPromptLabel" hidden>最终提示词（分段整合）</div>
+        <textarea id="finalPromptEditor" spellcheck="false" aria-label="最终提示词" hidden></textarea>
         <div id="promptStatus" role="status"></div>
         <div class="prompt-editor-actions">
           <button id="presetReset">恢复预设默认</button>
@@ -1169,11 +1218,26 @@ function selectedPromptPreset() {
 }
 function editorHasUnsavedChanges() {
   const preset = selectedPromptPreset();
-  return Boolean(preset && $('promptEditor').value !== preset.prompt);
+  if (!preset) return false;
+  if ($('promptEditor').value !== preset.prompt) return true;
+  return promptMode === 'video' && $('finalPromptEditor').value !== (preset.final || '');
 }
 function setPromptStatus(message='', error=false) {
   $('promptStatus').textContent = message;
   $('promptStatus').classList.toggle('error', error);
+}
+function updatePromptEditorLabels() {
+  const isVideo = promptMode === 'video';
+  $('promptEditorLabel').textContent = isVideo ? '分段提示词（每段分析）' : '系统提示词';
+  $('promptEditor').setAttribute('aria-label', isVideo ? '分段提示词' : '系统提示词');
+  $('finalPromptLabel').hidden = !isVideo;
+  $('finalPromptEditor').hidden = !isVideo;
+}
+function loadPresetEditors(preset) {
+  $('promptEditor').value = preset ? preset.prompt : '';
+  $('finalPromptEditor').value = preset ? (preset.final || '') : '';
+  setPromptStatus();
+  syncPromptEditorState();
 }
 function syncPromptEditorState() {
   const preset = selectedPromptPreset();
@@ -1231,10 +1295,8 @@ function renderPresetList() {
       if (preset.name !== selectedPresetName && editorHasUnsavedChanges() &&
           !confirm('当前提示词有未保存的更改，切换后将丢弃这些更改。继续？')) return;
       selectedPresetName = preset.name;
-      $('promptEditor').value = preset.prompt;
-      setPromptStatus();
+      loadPresetEditors(preset);
       renderPresetList();
-      syncPromptEditorState();
     };
     wrap.appendChild(row);
   }
@@ -1248,6 +1310,7 @@ async function refreshPromptCollections() {
     image: j.image || { current: j.current, presets: j.presets || [] },
     video: j.video || { current: null, presets: [] },
   };
+  updatePromptEditorLabels();
   renderPromptAssignments();
   renderPresetList();
 }
@@ -1258,11 +1321,8 @@ async function promptPresetAction(mode, action, values={}) {
   return await r.json();
 }
 function loadSelectedPreset() {
-  const preset = selectedPromptPreset();
-  $('promptEditor').value = preset ? preset.prompt : '';
-  setPromptStatus();
-  syncPromptEditorState();
   renderPresetList();
+  loadPresetEditors(selectedPromptPreset());
 }
 async function openPromptManager(mode) {
   promptMode = mode;
@@ -1284,6 +1344,7 @@ async function changePromptScope(mode) {
   if (editorHasUnsavedChanges() &&
       !confirm('当前提示词有未保存的更改，切换类型后将丢弃这些更改。继续？')) return;
   promptMode = mode;
+  updatePromptEditorLabels();
   selectedPresetName = promptCollection().current;
   loadSelectedPreset();
 }
@@ -1305,6 +1366,10 @@ $('promptEditor').oninput = () => {
   syncPromptEditorState();
   setPromptStatus(editorHasUnsavedChanges() ? '有未保存的更改' : '');
 };
+$('finalPromptEditor').oninput = () => {
+  syncPromptEditorState();
+  setPromptStatus(editorHasUnsavedChanges() ? '有未保存的更改' : '');
+};
 $('promptClose').onclick = closePromptManager;
 $('promptDone').onclick = closePromptManager;
 $('presetMask').onclick = e => { if (e.target === $('presetMask')) closePromptManager(); };
@@ -1314,24 +1379,23 @@ document.addEventListener('keydown', e => {
 $('presetSave').onclick = async () => {
   const preset = selectedPromptPreset();
   if (!preset) return;
+  const values = { name: selectedPresetName, prompt: $('promptEditor').value };
+  if (promptMode === 'video') values.final = $('finalPromptEditor').value;
   try {
-    const result = await promptPresetAction(promptMode, 'save', {
-      name: selectedPresetName, prompt: $('promptEditor').value,
-    });
+    const result = await promptPresetAction(promptMode, 'save', values);
     if (!result.ok) throw new Error(result.error || '保存失败');
     await refreshPromptCollections();
-    $('promptEditor').value = selectedPromptPreset()?.prompt || '';
-    syncPromptEditorState();
+    loadSelectedPreset();
     setPromptStatus('更改已保存');
   } catch (e) { setPromptStatus(e.message || '保存失败', true); }
 };
 $('presetAdd').onclick = async () => {
   const name = $('presetName').value.trim();
   if (!name) { setPromptStatus('请输入预设名称', true); return; }
+  const values = { name, prompt: $('promptEditor').value };
+  if (promptMode === 'video') values.final = $('finalPromptEditor').value;
   try {
-    const result = await promptPresetAction(promptMode, 'new', {
-      name, prompt: $('promptEditor').value,
-    });
+    const result = await promptPresetAction(promptMode, 'new', values);
     if (!result.ok) throw new Error(result.error || '新建失败');
     $('presetName').value = '';
     await refreshPromptCollections();
@@ -1383,6 +1447,63 @@ $('btnUnload').onclick = async () => {
   $('btnUnload').textContent = '卸载模型（释放显存）';
   poll();
 };
+
+// 最大输出长度：输入框可直接输入任意正整数，点击/聚焦时展开预设列表
+function setupTokenCombo(inputId, listId, fallback) {
+  const input = $(inputId), list = $(listId);
+  const showAll = () => {
+    for (const btn of list.children) btn.hidden = false;
+    list.hidden = false;
+  };
+  const filter = () => {
+    const q = input.value.trim();
+    let visible = 0;
+    for (const btn of list.children) {
+      const match = !q || btn.dataset.value.startsWith(q);
+      btn.hidden = !match;
+      if (match) visible++;
+    }
+    list.hidden = !visible;
+  };
+  input.addEventListener('focus', showAll);
+  input.addEventListener('click', showAll);
+  input.addEventListener('input', () => {
+    // 只允许数字：粘贴或输入的非数字字符直接剔除
+    const digits = input.value.replace(/\D+/g, '');
+    if (digits !== input.value) {
+      const pos = Math.max(0, (input.selectionStart || digits.length)
+                              - (input.value.length - digits.length));
+      input.value = digits;
+      input.setSelectionRange(pos, pos);
+    }
+    filter();
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === 'Escape') list.hidden = true;
+  });
+  input.addEventListener('blur', () => {
+    setTimeout(() => { list.hidden = true; }, 120);
+    const n = Math.floor(Number(input.value));
+    input.value = String(n > 0 ? n : fallback);   // 空值或 0 等非法值回退默认
+  });
+  list.addEventListener('mousedown', e => e.preventDefault());   // 保持输入框焦点
+  list.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-value]');
+    if (!btn) return;
+    input.value = btn.dataset.value;
+    list.hidden = true;
+  });
+}
+setupTokenCombo('maxtCombo', 'maxtComboList', 1024);
+setupTokenCombo('videoMaxTokensCombo', 'videoMaxTokensComboList', 8192);
+function currentMaxTokens() {
+  const n = Math.floor(Number($('maxtCombo').value));
+  return String(n > 0 ? n : 1024);   // 非法或非正数时回退默认 1024
+}
+function currentVideoMaxTokens() {
+  const n = Math.floor(Number($('videoMaxTokensCombo').value));
+  return String(n > 0 ? n : 8192);   // 非法或非正数时回退默认 8192
+}
 
 // ---- 选择文件 ----
 $('pickFiles').onclick = () => $('fileInput').click();
@@ -1481,7 +1602,7 @@ function pump() {
   const fd = new FormData(); fd.append('image', next.file, next.file.name);
   fd.append('lang', $('langSel').value);
   fd.append('res', $('resSel').value);
-  fd.append('maxt', $('maxtSel').value);
+  fd.append('maxt', currentMaxTokens());
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 300000);  // 单张 5 分钟超时，防止假死卡住队列
   fetch('/api/infer', { method: 'POST', body: fd, signal: ctl.signal })
@@ -1547,6 +1668,7 @@ function setVideoFile(file) {
   $('videoName').textContent = file.name + ' · ' + (file.size / 1024 / 1024).toFixed(1) + ' MB';
   $('videoFile').hidden = false;
   $('videoResult').style.display = 'none';
+  $('videoFinalStats').hidden = true;
   updateSegmentControls();
   setVideoStatus(modelReady ? '视频已就绪，可以开始反推' : '视频已就绪，请先加载模型');
   syncVideoButton();
@@ -1565,6 +1687,7 @@ $('videoRemove').onclick = () => {
   videoObjectUrl = null; videoFileObj = null; videoDuration = 0;
   $('videoPreview').removeAttribute('src'); $('videoPreview').load();
   $('videoFile').hidden = true; $('videoResult').style.display = 'none';
+  $('videoFinalStats').hidden = true;
   updateSegmentControls();
   setVideoStatus('选择一个 MP4 视频'); syncVideoButton();
 };
@@ -1572,12 +1695,13 @@ $('videoRun').onclick = async () => {
   if (!videoFileObj || !modelReady || videoRunning) return;
   videoRunning = true; syncVideoButton();
   $('videoResult').style.display = 'none';
+  $('videoFinalStats').hidden = true;
   setVideoStatus('正在上传视频、提取画面并分析，请稍候…');
   const fd = new FormData();
   fd.append('video', videoFileObj, videoFileObj.name);
   fd.append('fps', $('videoFps').value);
   fd.append('res', $('videoRes').value);
-  fd.append('maxt', $('videoMaxTokens').value);
+  fd.append('maxt', currentVideoMaxTokens());
   fd.append('lang', $('videoLang').value);
   const jobId = crypto.randomUUID();
   fd.append('segment_enabled', $('segmentEnabled').checked ? '1' : '0');
@@ -1592,7 +1716,14 @@ $('videoRun').onclick = async () => {
     if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
     $('videoPrompt').textContent = j.prompt || '';
     const s = j.stats || {};
-    $('videoStats').textContent = `${s.frames || 0} 帧（${s.fps || 0} FPS） · ${s.segments > 1 ? s.segments + ' 段顺序分析 · ' : ''}视频 ${s.duration || 0}s · 提取 ${s.extract_sec || 0}s · 推理 ${s.sec || 0}s · ${s.tokens || 0} tok · 上下文 ${(s.n_ctx || 0) / 1024}K`;
+    $('videoStats').textContent = `${s.frames || 0} 帧（${s.fps || 0} FPS） · ${s.segments > 1 ? s.segments + ' 段顺序分析 · ' : ''}视频 ${s.duration || 0}s · 提取 ${s.extract_sec || 0}s · 推理 ${s.sec || 0}s · ${s.tokens || 0} tok · 上下文 ${(s.n_ctx || 0) / 1024}K${s.segments > 1 ? ` · 每段输出 ≤ ${s.seg_out || 0} tok` : ''}${s.merge ? ` · 中间合并 ${s.merge.calls} 次 ${s.merge.tokens} tok / ${s.merge.sec}s` : ''}`;
+    const fEl = $('videoFinalStats');
+    if (s.final) {
+      fEl.hidden = false;
+      fEl.textContent = `最终整合 · ${s.final.tokens || 0} tok · ${s.final.tps || 0} tok/s · ${s.final.sec || 0}s`;
+    } else {
+      fEl.hidden = true; fEl.textContent = '';
+    }
     renderVideoSegments(j.segments || []);
     $('videoResult').style.display = 'flex';
     setVideoStatus('视频反推完成');
@@ -1623,7 +1754,10 @@ function renderVideoSegments(segments) {
   for (const segment of segments) {
     const row = document.createElement('div'); row.className = 'segment-result';
     const title = document.createElement('div'); title.className = 'segment-title';
-    title.textContent = `第 ${segment.index} 段 · ${segment.start}s–${segment.end}s`;
+    const meta = segment.stats
+      ? ` · ${segment.stats.tokens || 0} tok · ${segment.stats.tps || 0} tok/s · ${segment.stats.sec || 0}s`
+      : '';
+    title.textContent = `第 ${segment.index} 段 · ${segment.start}s–${segment.end}s${meta}`;
     const text = document.createElement('div'); text.className = 'segment-text';
     text.textContent = segment.prompt;
     row.append(title, text); target.appendChild(row);
@@ -1717,7 +1851,8 @@ def api_prompts():
     """列出图片和视频的提示词方案（含当前选中项）。"""
     image_presets = [{"name": n, "prompt": p, "current": n == _prompt_current}
                      for n, p in _prompt_presets.items()]
-    video_presets = [{"name": n, "prompt": p, "current": n == _video_prompt_current}
+    video_presets = [{"name": n, "prompt": p["system"], "system": p["system"],
+                      "final": p["final"], "current": n == _video_prompt_current}
                      for n, p in _video_presets.items()]
     return jsonify({
         "ok": True,
@@ -1731,9 +1866,10 @@ def api_prompts():
 @app.post("/api/prompts")
 def api_prompts_set():
     """在图片或视频提示词集中执行方案操作。"""
-    global _prompt_current, _prompt_presets, _video_prompt_current, _video_sys_prompt
+    global _prompt_current, _prompt_presets, _video_prompt_current
     d = request.get_json(silent=True) or {}
     mode = "video" if d.get("mode") == "video" else "image"
+
     if mode == "video":
         presets = _video_presets
         current = _video_prompt_current
@@ -1756,14 +1892,26 @@ def api_prompts_set():
             return jsonify({"ok": False, "error": "提示词不能为空"}), 400
         if target not in presets:
             return jsonify({"ok": False, "error": "方案不存在"}), 400
-        presets[target] = p
+        if mode == "video":
+            final = (d.get("final") or "").strip()
+            if not final:
+                return jsonify({"ok": False, "error": "最终提示词不能为空"}), 400
+            presets[target] = {"system": p, "final": final}
+        else:
+            presets[target] = p
     elif act == "new":
         name = target if d.get("name") else ""
         if not name:
             return jsonify({"ok": False, "error": "方案名不能为空"}), 400
         if name in presets:
             return jsonify({"ok": False, "error": "方案名已存在"}), 400
-        presets[name] = (d.get("prompt") or "").strip() or fallback
+        if mode == "video":
+            presets[name] = {
+                "system": (d.get("prompt") or "").strip() or fallback,
+                "final": (d.get("final") or "").strip() or VIDEO_DEFAULT_FINAL,
+            }
+        else:
+            presets[name] = (d.get("prompt") or "").strip() or fallback
         target = name
     elif act == "delete":
         if target not in presets:
@@ -1776,21 +1924,25 @@ def api_prompts_set():
     elif act == "reset":
         if target not in presets:
             return jsonify({"ok": False, "error": "方案不存在"}), 400
-        presets[target] = builtin.get(target, fallback)
+        if mode == "video":
+            presets[target] = _normalize_video_preset(builtin.get(target, fallback))
+        else:
+            presets[target] = builtin.get(target, fallback)
     else:
         return jsonify({"ok": False, "error": "未知操作"}), 400
 
     if mode == "video":
         _video_prompt_current = current
-        _video_sys_prompt = presets[current]
+        _apply_video_preset()
         saved = _save_video_presets()
     else:
         _prompt_current = current
         saved = _save_presets()
     if not saved:
         return jsonify({"ok": False, "error": "预设保存失败"}), 500
+    prompt_response = presets[current]["system"] if mode == "video" else presets[current]
     return jsonify({"ok": True, "current": current, "target": target,
-                    "prompt": presets[current]})
+                    "prompt": prompt_response})
 
 
 @app.get("/api/video-prompt")
@@ -1838,16 +1990,20 @@ def infer():
 
     with _infer_lock:  # GPU 串行
         try:
-            try:
-                res = int(request.form.get("res", DEFAULT_RES))
-            except ValueError:
-                res = DEFAULT_RES
-            res = max(512, min(res, 4096))
+            res_raw = (request.form.get("res") or "").strip().lower()
+            if res_raw in ("orig", "original", "0"):
+                res = None   # 原始尺寸：不缩放
+            else:
+                try:
+                    res = int(res_raw) if res_raw else DEFAULT_RES
+                except ValueError:
+                    res = DEFAULT_RES
+                res = max(512, min(res, 4096))
             try:
                 maxt = int(request.form.get("maxt", MAX_NEW_TOKENS))
-            except ValueError:
+            except (TypeError, ValueError):
                 maxt = MAX_NEW_TOKENS
-            maxt = max(128, min(maxt, 4096))
+            maxt = max(1, min(maxt, 32768))   # 自定义任意正数，上限受模型最大上下文约束
             prompt, stats = analyze_image(pil, request.form.get("lang", "zh"), res, maxt)
         except Exception as e:
             traceback.print_exc()
@@ -1873,14 +2029,15 @@ def infer_video():
         return jsonify({"ok": False, "error": "目前只支持 MP4 视频"}), 400
 
     try:
-        sample_fps = int(request.form.get("fps", "1"))
+        sample_fps = int(request.form.get("fps", "3"))
         sample_fps = max(1, min(sample_fps, VIDEO_MAX_FPS))
-        max_side = max(256, min(int(request.form.get("res", "768")), 2048))
-        max_tokens = max(128, min(int(request.form.get("maxt", "4096")), 8192))
+        res_raw = request.form.get("res", "768")
+        max_side = None if res_raw == "orig" else max(256, min(int(res_raw), 2048))
+        max_tokens = max(1, min(int(request.form.get("maxt", "8192")), 262144))
         lang = "en" if request.form.get("lang") == "en" else "zh"
         segment_enabled = request.form.get("segment_enabled") == "1"
-        frames_per_segment = (int(request.form.get("frames_per_segment", "8"))
-                              if segment_enabled else 8)
+        frames_per_segment = (int(request.form.get("frames_per_segment", "9"))
+                              if segment_enabled else 9)
         frames_per_segment = max(1, min(frames_per_segment, 60))
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "视频参数格式无效"}), 400
@@ -1896,6 +2053,7 @@ def infer_video():
             frames, duration = extract_video_frames(video_path, sample_fps, max_side)
             extract_sec = round(time.time() - started, 1)
             n_ctx = int(_state.get("n_ctx") or N_CTX)
+            max_tokens = max(1, min(max_tokens, n_ctx))
             segment_count = (math.ceil(len(frames) / frames_per_segment)
                              if segment_enabled else 1)
             frame_groups = ([frames[i:i + frames_per_segment]
@@ -1906,9 +2064,7 @@ def infer_video():
 
             def estimate_text_tokens(text):
                 return int(len(text.split()) * 1.5) if lang == "en" else len(text)
-            instruction_tokens = estimate_text_tokens(
-                _video_sys_prompt + (VIDEO_INSTRUCTION_EN if lang == "en" else VIDEO_INSTRUCTION_ZH)
-            ) + 512
+            instruction_tokens = estimate_text_tokens(_video_sys_prompt) + 512
 
             with _infer_lock:
                 if _state["status"] != "ready" or _model is None:
@@ -1919,8 +2075,13 @@ def infer_video():
                 segment_results = []
                 model_seconds = 0.0
                 total_tokens = 0
-                segment_max_tokens = (max(64, min(512, max_tokens // segment_count))
-                                      if segment_enabled else max_tokens)
+                merge_seconds = 0.0
+                merge_tokens = 0
+                merge_calls = 0
+                final_stats = None
+                # 分段模式下每段各自独占完整的输出预算（不按段数切分、段间不共享），描述更完整
+                segment_max_tokens = max(64, max_tokens)
+                segment_out_cap = segment_max_tokens
                 for index, group in enumerate(frame_groups, 1):
                     if segment_enabled:
                         start_sec = 0.0 if index == 1 else group[0][0]
@@ -1934,8 +2095,12 @@ def infer_video():
                         ((size[0] + 27) // 28) * ((size[1] + 27) // 28)
                         for _timestamp, _image_data, size in group
                     )
-                    estimated_tokens = (visual_tokens + segment_max_tokens +
-                                        estimate_text_tokens(previous_text) + instruction_tokens)
+                    prev_tokens = estimate_text_tokens(previous_text)
+                    # 每段输出独立，但不能超出该段剩余的上下文空间；不够时按余量自动收窄
+                    avail_out = n_ctx - visual_tokens - prev_tokens - instruction_tokens
+                    seg_out = max(64, min(segment_max_tokens, avail_out))
+                    segment_out_cap = min(segment_out_cap, seg_out)
+                    estimated_tokens = visual_tokens + seg_out + prev_tokens + instruction_tokens
                     if estimated_tokens > n_ctx:
                         message = (
                             f"第 {index} 段约需 {estimated_tokens:,} 个上下文 token，当前为 {n_ctx:,}。"
@@ -1950,7 +2115,7 @@ def infer_video():
                     )
                     info = (index, segment_count, start_sec, end_sec) if segment_enabled else None
                     segment_prompt, segment_stats = analyze_video_frames(
-                        group, lang, segment_max_tokens, info, previous_text or None
+                        group, lang, seg_out, info, previous_text or None
                     )
                     model_seconds += segment_stats["sec"]
                     total_tokens += segment_stats["tokens"]
@@ -1960,6 +2125,7 @@ def infer_video():
                             "start": round(start_sec, 2),
                             "end": round(end_sec, 2),
                             "prompt": segment_prompt,
+                            "stats": segment_stats,
                         })
                     else:
                         prompt = segment_prompt
@@ -1968,16 +2134,14 @@ def infer_video():
                 if segment_enabled:
                     if segment_count == 1:
                         prompt = segment_results[0]["prompt"]
+                        stats = dict(segment_results[0]["stats"])
                     else:
-                        synth_instruction = (
-                            "Combine chronological video segment descriptions into one coherent prompt."
-                            if lang == "en" else "将按时间顺序排列的视频分段描述整合为一条连贯提示词。"
-                        )
                         synth_fixed_tokens = estimate_text_tokens(
-                            _video_sys_prompt + synth_instruction
+                            _video_sys_prompt + _video_final_instruction
                         ) + 512
+                        # 分段描述变长后，中间合并也需要相应放宽，避免合并时被截断
                         intermediate_max_tokens = max(
-                            64, min(512, max_tokens, n_ctx // 16)
+                            64, min(max_tokens, max(512, n_ctx // 8))
                         )
                         chunk_limit = max(
                             256,
@@ -2028,6 +2192,9 @@ def infer_video():
                                 )
                                 model_seconds += merge_stats["sec"]
                                 total_tokens += merge_stats["tokens"]
+                                merge_seconds += merge_stats["sec"]
+                                merge_tokens += merge_stats["tokens"]
+                                merge_calls += 1
                                 merged_items.append({
                                     "index": chunk[0]["index"],
                                     "start": chunk[0]["start"],
@@ -2045,12 +2212,23 @@ def infer_video():
                     stats = {"sec": round(model_seconds, 1), "tokens": total_tokens,
                              "tps": round(total_tokens / model_seconds, 1)
                              if model_seconds > 0 else 0.0}
+                    if final_stats:
+                        stats["final"] = final_stats
+                    if merge_calls:
+                        stats["merge"] = {
+                            "calls": merge_calls,
+                            "sec": round(merge_seconds, 1),
+                            "tokens": merge_tokens,
+                            "tps": round(merge_tokens / merge_seconds, 1)
+                            if merge_seconds > 0 else 0.0,
+                        }
         stats["extract_sec"] = extract_sec
         stats["duration"] = round(duration, 2)
         stats["frames"] = len(frames)
         stats["fps"] = sample_fps
         stats["n_ctx"] = n_ctx
         stats["segments"] = segment_count
+        stats["seg_out"] = segment_out_cap   # 每段实际可用的输出上限（受上下文余量约束）
         _set_video_job(job_id, status="complete", phase="complete", segment=segment_count,
                        total=segment_count)
     except Exception as e:
