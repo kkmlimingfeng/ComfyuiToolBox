@@ -183,6 +183,19 @@ def load_config():
     cfg.setdefault("thresholds", {})            # 每个标签模型的默认阈值 {id: {gen, char}}
     cfg.setdefault("tr_color", "#00b894")       # 翻译文字颜色
     cfg.setdefault("tr_size", 13)               # 翻译文字字号(px)
+    cfg.setdefault("priority", [                # 标签优先级（打标配置页）
+        {"kind": "builtin", "id": "chars_cpr"},
+        {"kind": "builtin", "id": "rest"},
+    ])
+    cfg.setdefault("ignore_tags", "")           # 忽略标签（打标配置页）
+    cfg.setdefault("auto_ignore_tags", "")      # 自动匹配忽略标签（打标配置页）
+    if not isinstance(cfg["priority"], list):
+        cfg["priority"] = [{"kind": "builtin", "id": "chars_cpr"},
+                           {"kind": "builtin", "id": "rest"}]
+    if not isinstance(cfg["ignore_tags"], str):
+        cfg["ignore_tags"] = ""
+    if not isinstance(cfg["auto_ignore_tags"], str):
+        cfg["auto_ignore_tags"] = ""
     if not (isinstance(cfg["tr_color"], str) and len(cfg["tr_color"]) == 7
             and cfg["tr_color"].startswith("#")):
         cfg["tr_color"] = "#00b894"
@@ -508,7 +521,14 @@ def _preprocess(pil_img, size):
 
 
 def _escape_tag(tag):
-    return tag.replace("(", r"\(").replace(")", r"\)")
+    r"""转义标签中的左右括号；前面已有 \ 的不重复加（避免 \( 变 \\( ）。"""
+    out = []
+    for i, ch in enumerate(tag):
+        if ch in "()" and (i == 0 or tag[i - 1] != "\\"):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _wd14_interrogate(model_id, pil_img, gen_t, char_t, cfg):
@@ -1098,26 +1118,80 @@ def _append_prompts(prefix, suffix, body):
     return ", ".join(parts)
 
 
-def _order_caption(chars, cpr, general):
-    """caption 固定顺序（规则优先级高于置信度排序）：
-    角色 → 作品(copyright) → 含 girl 标签 → solo → 含 look 标签 → 其余标签。
-    组内保持模型输出的置信度顺序；元素支持纯标签字符串或 (标签, 置信度) 元组。
-    前缀/后缀由 _append_prompts 另行拼接。批量打标与效果对比页共用。"""
-    def _name(it):
-        return (it[0] if isinstance(it, tuple) else it).lower()
+# ---------------------------------------------------------------- 打标配置 ---
 
-    girls, solo, looks, rest = [], [], [], []
-    for it in general:
-        l = _name(it)
-        if "girl" in l:
-            girls.append(it)
-        elif l == "solo":
-            solo.append(it)
-        elif "look" in l:
-            looks.append(it)
+def _norm_priority(items):
+    """校验/规范化打标配置的优先级列表；内置必备项缺失时自动补到末尾。"""
+    out = []
+    if isinstance(items, list):
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            kind = it.get("kind")
+            if kind == "builtin" and it.get("id") in ("chars_cpr", "rest"):
+                if not any(x["kind"] == "builtin" and x["id"] == it["id"] for x in out):
+                    out.append({"kind": "builtin", "id": it["id"]})
+            elif kind in ("exact", "contains"):
+                tags = (it.get("tags") or "").strip()
+                out.append({"kind": kind, "tags": tags})
+    for bid in ("chars_cpr", "rest"):
+        if not any(x["kind"] == "builtin" and x["id"] == bid for x in out):
+            out.append({"kind": "builtin", "id": bid})
+    return out
+
+
+def _order_tags_priority(chars, cpr, general, items):
+    """按"打标配置"页的优先级列表排序。
+
+    前缀/后缀由 _append_prompts 另行拼接，固定在最前/最后，不参与本函数。
+    项类型：
+    - builtin chars_cpr：角色和作品标签（角色在前）
+    - builtin rest：其余标签（未被任何项匹配的兜底）
+    - exact：自定义项，填入的标签精确匹配（归一化比较），同项同优先级
+    - contains：自动匹配项，匹配所有"包含"填入字符串的标签
+      （如 girl 匹配 1girl、2girls、girl on top 等）
+    每个标签按列表顺序归入第一个匹配的项；组内保持模型置信度顺序。
+    元素支持纯标签字符串或 (标签, 置信度) 元组，元组原样透传。"""
+    def _val(el):
+        return el[0] if isinstance(el, tuple) else el
+
+    parsed = []
+    for it in items:
+        if it["kind"] == "builtin":
+            parsed.append(it)
         else:
-            rest.append(it)
-    return list(chars) + list(cpr) + girls + solo + looks + rest
+            parsed.append({"kind": it["kind"],
+                           "set": {_tag_norm(t) for t in it.get("tags", "").split(",")
+                                   if _tag_norm(t)}})
+    rest_idx = next(i for i, it in enumerate(parsed)
+                    if it["kind"] == "builtin" and it["id"] == "rest")
+
+    def level(tag, origin):
+        tag = _val(tag)
+        n = _tag_norm(tag)
+        for i, it in enumerate(parsed):
+            if it["kind"] == "exact":
+                if n in it["set"]:
+                    return i
+            elif it["kind"] == "contains":
+                if any(s in n for s in it["set"]):
+                    return i
+            elif it["id"] == "chars_cpr" and origin != "gen":
+                return i
+        return rest_idx
+
+    buckets = [[] for _ in parsed]
+    seq = 0
+    for origin, group in (("char", chars), ("cpr", cpr), ("gen", general)):
+        for el in group:
+            i = level(el, origin)
+            buckets[i].append((seq, el))
+            seq += 1
+    out = []
+    for b in buckets:
+        b.sort(key=lambda x: x[0])   # 稳定排序：组内保持模型置信度顺序
+        out.extend(el for _, el in b)
+    return out
 
 
 def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg):
@@ -1203,6 +1277,20 @@ def _dedup_tags(text):
     return ", ".join(out)
 
 
+def _filter_ignored(text, ign, auto_ign):
+    """对排好序的整行应用忽略过滤（批量打标与效果对比共用）。
+
+    ign：精确忽略集合（_tag_norm 归一化后全等）；auto_ign：自动匹配忽略集合（包含即命中）。
+    两集合可为空；匹配均忽略大小写、转义括号与下划线/空格差异。"""
+    if ign:
+        text = ", ".join([t.strip() for t in text.split(",")
+                          if t.strip() and _tag_norm(t) not in ign])
+    if auto_ign:
+        text = ", ".join([t.strip() for t in text.split(",")
+                          if t.strip() and not any(s in _tag_norm(t) for s in auto_ign)])
+    return text
+
+
 def _run_job(cfg, model_cfg):
     global _job
     folder = cfg["folder"]
@@ -1212,13 +1300,19 @@ def _run_job(cfg, model_cfg):
     prefix, suffix = cfg.get("prefix", ""), cfg.get("suffix", "")
     skip = cfg.get("skip_existing", False)
     spaces = bool(cfg.get("spaces", False)) and mode == "tag"
+    escape_paren = cfg.get("escape_paren", True)   # 括号转义开关（批量打标选项）
     keep_anchor = (cfg.get("keep_anchor") or "").strip()
     if mode != "tag":
         keep_anchor = ""   # 锚点保留仅用于标签打标模式
     ignore = set()
+    auto_ign = set()
+    pri_items = _norm_priority(model_cfg.get("priority"))
     if mode == "tag":
-        ignore = {_tag_norm(t) for t in (cfg.get("ignore_tags") or "").split(",")
+        # 忽略标签与自动匹配忽略均来自"打标配置"页保存的值
+        ignore = {_tag_norm(t) for t in (model_cfg.get("ignore_tags") or "").split(",")
                   if _tag_norm(t)}
+        auto_ign = {_tag_norm(t) for t in (model_cfg.get("auto_ignore_tags") or "").split(",")
+                    if _tag_norm(t)}
     freq = {}   # 标签出现次数（标签打标模式统计）
 
     try:
@@ -1272,14 +1366,15 @@ def _run_job(cfg, model_cfg):
                                 char_model, im, 1.1, cfg["char_t"], model_cfg)
                             _, cpr, general = _tag_interrogate(
                                 model, im, cfg["gen_t"], 1.1, model_cfg)
-                        raw = _order_caption(
+                        raw = _order_tags_priority(
                             [t for t, _ in chars], [t for t, _ in cpr],
-                            [t for t, _ in general])
+                            [t for t, _ in general], pri_items)
                         if spaces:
                             raw = [t.replace("_", " ") for t in raw]
                         if ignore:
                             raw = [t for t in raw if _tag_norm(t) not in ignore]
-                        body = ", ".join([_escape_tag(t) for t in raw])
+                        body = ", ".join(
+                            [(_escape_tag(t) if escape_paren else t) for t in raw])
                     else:
                         body, _nl_stats = _nl_interrogate(
                             model, im, cfg.get("nl_prompt", ""),
@@ -1293,6 +1388,8 @@ def _run_job(cfg, model_cfg):
                 text = _append_prompts(prefix, suffix, body)
                 if mode == "tag":
                     text = _dedup_tags(text)
+                    # 自动匹配忽略：对排好序的最终整行生效（含保留的旧标签与前缀/后缀）
+                    text = _filter_ignored(text, set(), auto_ign)
                     # 标签统计以最终写入内容为准（含保留标签、前缀/后缀追加，去重后）
                     for t in text.split(","):
                         t = t.replace("\\(", "(").replace("\\)", ")").strip()
@@ -1358,7 +1455,7 @@ def start_job(cfg):
         cfg["maxt"] = min(4096, max(32, int(cfg.get("maxt", 512))))
         cfg["spaces"] = bool(cfg.get("spaces", False))
         cfg["keep_anchor"] = (cfg.get("keep_anchor") or "").strip()
-        cfg["ignore_tags"] = (cfg.get("ignore_tags") or "").strip()
+        cfg["escape_paren"] = cfg.get("escape_paren", True)
     except (TypeError, ValueError):
         return False, "阈值或参数必须是数字"
     _last_cfg = dict(cfg)
@@ -1402,9 +1499,20 @@ def _run_compare(models, params):
                     chars, cpr, general = _tag_interrogate(
                         m["id"], im, params["gen_t"], params["char_t"],
                         model_cfg)
-                    items = _order_caption(chars, cpr, general)  # 与批量打标相同的固定顺序
-                    res["output"] = ", ".join(
-                        [_escape_tag(t) for t, _ in items])
+                    items = _order_tags_priority(
+                        chars, cpr, general,
+                        _norm_priority(model_cfg.get("priority")))
+                    # 与批量打标一致的忽略过滤：精确忽略 + 自动匹配忽略（打标配置页）
+                    ign = {_tag_norm(t) for t in (model_cfg.get("ignore_tags") or "").split(",")
+                           if _tag_norm(t)}
+                    auto_ign = {_tag_norm(t)
+                                for t in (model_cfg.get("auto_ignore_tags") or "").split(",")
+                                if _tag_norm(t)}
+                    if ign or auto_ign:
+                        items = [it for it in items
+                                 if (not ign or _tag_norm(it[0]) not in ign)
+                                 and not any(s in _tag_norm(it[0]) for s in auto_ign)]
+                    res["output"] = ", ".join([_escape_tag(t) for t, _ in items])
                     # 附带置信度（3 位小数），对比页在每个标签旁展示
                     res["detail"] = [[t, round(c, 3)] for t, c in items]
                 else:
@@ -1670,6 +1778,17 @@ PAGE = r"""<!doctype html>
            background:var(--input-bg); color:var(--text); font-size:13px; }
   .radio { display:inline-flex; align-items:center; gap:5px; font-size:13.5px;
            margin-right:16px; cursor:pointer; }
+  /* 打标配置：优先级列表 */
+  .pri-row { display:flex; align-items:center; gap:8px; padding:8px 12px;
+             border:1px solid var(--border); border-radius:8px;
+             background:var(--inner); margin-bottom:6px; }
+  .pri-row.pri-fixed { opacity:.6; font-size:13px; background:transparent; }
+  .pri-badge { font-size:11px; padding:2px 8px; border-radius:4px; color:#fff;
+               flex-shrink:0; }
+  .pri-row button { flex-shrink:0; }
+  .pri-row input[type=text] { flex:1; min-width:0; padding:7px 10px; border-radius:8px;
+             border:1px solid var(--input-border); background:var(--input-bg);
+             color:var(--text); font-size:13px; }
   .theme-toggle { position:fixed; bottom:20px; right:20px; font-size:24px; cursor:pointer;
                   background:transparent; border:none; padding:6px 10px; border-radius:6px;
                   transition:background .2s; z-index:999; }
@@ -1799,21 +1918,17 @@ PAGE = r"""<!doctype html>
       <label id="spacesLabel" style="font-size:13px; display:flex; align-items:center; gap:6px;">
         <input type="checkbox" id="spaces_opt"> 空格代替下划线
       </label>
+      <label id="keepLabel" style="font-size:13px; display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="keep_existing"> 保留锚点前标签
+      </label>
+      <label id="parenLabel" style="font-size:13px; display:flex; align-items:center; gap:6px;">
+        <input type="checkbox" id="escape_paren" checked> 括号转义
+      </label>
     </div>
 
     <div class="row" id="ignoreRow">
-      <div style="flex:1; display:flex; align-items:center; gap:6px; min-width:0;">
-        <label id="keepLabel" style="font-size:13px; display:flex; align-items:center; gap:6px; white-space:nowrap;">
-          <input type="checkbox" id="keep_existing"> 保留锚点前标签
-        </label>
-        <input type="text" id="keep_anchor" placeholder="锚点标签，如 girl / 1girl"
-               style="flex:1; min-width:0; display:none">
-      </div>
-      <div style="flex:1; display:flex; align-items:center; gap:6px; min-width:0;">
-        <label id="ignoreLabel" class="lab" style="width:auto; white-space:nowrap;">忽略标签</label>
-        <input type="text" id="ignore_tags" placeholder="要去除的标签，如 3d, render（逗号分隔）"
-               style="flex:1; min-width:0">
-      </div>
+      <label class="lab">锚点标签</label>
+      <input type="text" id="keep_anchor" placeholder="如 girl / 1girl（勾选"保留锚点前标签"后生效）" style="flex:1; display:none">
     </div>
 
     <div class="row">
@@ -1826,14 +1941,14 @@ PAGE = r"""<!doctype html>
 
     <div class="tip">结果写入图片同名的 .txt 文件（UTF-8）。角色模型与标签模型相同则一次推理同时出角色和普通标签；
     不同则先用角色模型识别角色（角色阈值）、再用标签模型识别普通标签（标签阈值）后拼接。
-    输出"角色标签在前、普通标签在后"，括号会被转义；评分（rating）标签不写入。
+    标签顺序由"打标配置"页的优先级决定（默认"角色和作品 → 其余标签"）；评分（rating）标签不写入。
+    勾选"括号转义"时标签中的左右括号会自动加 \ 转义（已有 \ 的不重复加）。
     勾选"保留锚点前标签"时：已有 txt 会先按锚点标签（如 girl / 1girl）切开，锚点之前的标签原样保留，
-    新打标结果接在其后（顺序：前缀追加 → 保留标签 → 角色 → 作品 → girl/solo/look → 其余 → 后缀追加）；
+    新打标结果接在其后（顺序：前缀追加 → 保留标签 → 按优先级排序的新标签 → 后缀追加）；
     锚点 girl 及 girl 家族（1girl/2girls/3girls/4girls）精确匹配失败时从头匹配第一个家族标签，其余含 girl 的标签不会误匹配；
     锚点在已有 txt 中完全找不到时不保留任何旧标签，直接覆盖。
-    填写"忽略标签"（逗号分隔，如 3d, render）会把生成的结果中对应标签去掉（忽略大小写与下划线/空格差异），
-    保留的旧标签和前缀/后缀不受影响。
-    写入前自动去重：排序完成后重复的标签只保留最早出现的那个（忽略大小写与下划线/空格差异）。</div>
+    写入前自动去重：排序完成后重复的标签只保留最早出现的那个（忽略大小写与下划线/空格差异）。
+    忽略标签、自动匹配忽略都在"配置… → 打标配置"页设置。</div>
 
     <div id="jobbox" style="display:none">
       <div id="bar"><div id="barfill"></div></div>
@@ -1920,10 +2035,15 @@ PAGE = r"""<!doctype html>
   </div><!-- /cmpView -->
 </div>
 
-<!-- 模型配置窗口 -->
+<!-- 配置窗口（模型配置 / 打标配置，点击窗口外区域关闭） -->
 <div class="modal" id="cfgModal" style="display:none">
   <div class="modal-card">
-    <h2>⚙️ 模型配置</h2>
+    <div class="tabs" style="margin-bottom:12px">
+      <button class="tab active" id="cfgTabModel" onclick="cfgSwitch('model')">模型配置</button>
+      <button class="tab" id="cfgTabTag" onclick="cfgSwitch('tag')">打标配置</button>
+    </div>
+
+    <div id="cfgModelPage">
     <div class="row">
       <label class="lab">下载源</label>
       <label class="radio"><input type="radio" name="dlsrc" value="mirror" checked> 镜像（hf-mirror.com）</label>
@@ -1955,6 +2075,38 @@ PAGE = r"""<!doctype html>
       <div id="cfgbar"><div id="cfgbarfill"></div></div>
       <div id="cfgDlText" class="tip" style="margin-top:6px"></div>
     </div>
+    </div><!-- /cfgModelPage -->
+
+    <div id="cfgTagPage" style="display:none">
+      <div class="tip">标签优先级：生成的标签按列表从上到下归入第一个匹配的项，同项内保持模型置信度顺序；
+      前缀固定最前、后缀固定最后（内置必备项不可删除，可上下移动）。<br>
+      <b>自定义项</b>：精确匹配填入的标签（如填 girl 只匹配 girl）；<b>自动匹配项</b>：匹配所有包含填入字符串的标签
+      （如填 girl 会匹配 1girl、2girls、girl on top 等）。保存后对下一次批量打标生效。</div>
+
+      <div id="priList" style="margin-top:10px"></div>
+
+      <div class="row" style="margin-top:12px">
+        <button class="plain" onclick="priAdd('exact')">＋ 自定义项</button>
+        <button class="plain" onclick="priAdd('contains')">＋ 自动匹配项</button>
+        <button class="plain" onclick="saveTagConfig()">保存配置</button>
+        <span id="priMsg" class="ok" style="margin-left:8px"></span>
+      </div>
+
+      <div class="row" style="margin-top:6px">
+        <label class="lab">忽略标签</label>
+        <input type="text" id="cfgIgnoreTags" placeholder="要去除的标签，如 3d, render（英文逗号分隔）"
+               style="flex:1">
+      </div>
+      <div class="tip">批量打标时会把生成的结果中对应标签去掉（忽略大小写与下划线/空格差异），保留的旧标签和前缀/后缀不受影响。</div>
+
+      <div class="row" style="margin-top:12px">
+        <label class="lab">自动匹配忽略</label>
+        <input type="text" id="cfgAutoIgnoreTags" placeholder="去除所有包含这些字符串的标签，如 background（英文逗号分隔）"
+               style="flex:1">
+      </div>
+      <div class="tip">优先级处理完成后，对最终整行做"包含"过滤：所有包含填入字符串的标签都会被去掉
+      （如填 girl 会去掉 1girl、2girls、girl on top；忽略大小写与下划线/空格差异），作用于最终写入的整行内容。</div>
+    </div><!-- /cfgTagPage -->
 
     <div class="row" style="margin:14px 0 0; justify-content:flex-end">
       <button class="plain" onclick="closeConfig()">关闭</button>
@@ -2032,8 +2184,8 @@ $('mode').onchange = () => {
     $('spacesLabel').style.display = nl ? 'none' : '';
     $('keepLabel').style.display = nl ? 'none' : '';
     $('ignoreRow').style.display = nl ? 'none' : '';
-    $('ignoreLabel').style.display = nl ? 'none' : '';
-    $('ignore_tags').style.display = nl ? 'none' : '';
+    $('keepLabel').style.display = nl ? 'none' : '';
+    $('parenLabel').style.display = nl ? 'none' : '';
     $('keep_anchor').style.display = (nl || !$('keep_existing').checked) ? 'none' : '';
     if (nl) $('keep_existing').checked = false;
     renderModels();
@@ -2135,6 +2287,12 @@ async function openConfig() {
             el.onchange = saveMirror;
         });
         $('hfToken').value = c.hf_token || '';
+        priItems = (Array.isArray(c.priority) ? c.priority : [])
+            .map(it => it.kind === 'builtin' ? { kind: 'builtin', id: it.id }
+                                             : { kind: it.kind, tags: it.tags || '' });
+        $('cfgIgnoreTags').value = c.ignore_tags || '';
+        $('cfgAutoIgnoreTags').value = c.auto_ignore_tags || '';
+        renderPri();
     } catch (e) {}
     renderCfgTable();
     clearInterval(cfgTimer);
@@ -2146,6 +2304,114 @@ function closeConfig() {
     $('cfgModal').style.display = 'none';
     clearInterval(cfgTimer);
     loadModels();   // 关闭时刷新主界面下拉框
+}
+
+// 点击窗口外（遮罩层本身）关闭配置窗口
+$('cfgModal').addEventListener('click', e => {
+    if (e.target === $('cfgModal')) closeConfig();
+});
+
+// ---- 配置窗口页签：模型配置 / 打标配置 ----
+function cfgSwitch(p) {
+    const model = p === 'model';
+    $('cfgModelPage').style.display = model ? '' : 'none';
+    $('cfgTagPage').style.display = model ? 'none' : '';
+    $('cfgTabModel').classList.toggle('active', model);
+    $('cfgTabTag').classList.toggle('active', !model);
+}
+
+// ---- 打标配置：标签优先级列表 ----
+let priItems = [];   // 中间可移动项（不含固定在最前/最后的"前缀/后缀"）
+
+const PRI_BUILTIN_LABEL = { chars_cpr: '角色和作品', rest: '其余标签（未被其他项匹配的兜底）' };
+const PRI_KIND_LABEL = { exact: '自定义', contains: '自动匹配' };
+
+function priStaticRow(text) {
+    const d = document.createElement('div');
+    d.className = 'pri-row pri-fixed';
+    d.textContent = text;
+    return d;
+}
+
+function renderPri() {
+    const box = $('priList');
+    box.innerHTML = '';
+    box.appendChild(priStaticRow('🔝 前缀（固定最前）'));
+    priItems.forEach((it, i) => {
+        const row = document.createElement('div');
+        row.className = 'pri-row';
+        const b = document.createElement('span');
+        b.className = 'pri-badge';
+        if (it.kind === 'builtin') {
+            b.textContent = '必备';
+            b.style.background = '#636e72';
+        } else {
+            b.textContent = PRI_KIND_LABEL[it.kind] || it.kind;
+            b.style.background = it.kind === 'exact' ? '#0984e3' : '#8e44ad';
+        }
+        row.appendChild(b);
+        if (it.kind === 'builtin') {
+            const lab = document.createElement('span');
+            lab.textContent = PRI_BUILTIN_LABEL[it.id] || it.id;
+            lab.style.cssText = 'flex:1; font-size:13.5px;';
+            row.appendChild(lab);
+        } else {
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.value = it.tags || '';
+            inp.placeholder = it.kind === 'exact'
+                ? '精确匹配的标签，英文逗号分隔，如 girl, solo'
+                : '匹配包含这些字符串的标签，英文逗号分隔，如 girl';
+            inp.oninput = () => { it.tags = inp.value; };
+            row.appendChild(inp);
+        }
+        const mk = (txt, fn, dis) => {
+            const btn = document.createElement('button');
+            btn.className = 'mini'; btn.textContent = txt; btn.disabled = !!dis;
+            btn.onclick = fn;
+            return btn;
+        };
+        row.appendChild(mk('↑', () => {
+            [priItems[i - 1], priItems[i]] = [priItems[i], priItems[i - 1]];
+            renderPri();
+        }, i === 0));
+        row.appendChild(mk('↓', () => {
+            [priItems[i + 1], priItems[i]] = [priItems[i], priItems[i + 1]];
+            renderPri();
+        }, i === priItems.length - 1));
+        if (it.kind !== 'builtin') {
+            row.appendChild(mk('✕', () => { priItems.splice(i, 1); renderPri(); }));
+        }
+        box.appendChild(row);
+    });
+    box.appendChild(priStaticRow('🔚 后缀（固定最后）'));
+}
+
+function priAdd(kind) {
+    priItems.push({ kind, tags: '' });
+    renderPri();
+    const inputs = $('priList').querySelectorAll('input[type=text]');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+}
+
+async function saveTagConfig() {
+    const body = { tag_config: {
+        priority: priItems.map(it => it.kind === 'builtin'
+            ? { kind: 'builtin', id: it.id }
+            : { kind: it.kind, tags: it.tags || '' }),
+        ignore_tags: $('cfgIgnoreTags').value,
+        auto_ignore_tags: $('cfgAutoIgnoreTags').value,
+    } };
+    try {
+        const r = await fetch('/api/config', { method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body) });
+        const j = await r.json();
+        $('priMsg').textContent = j.ok ? '已保存 ✓' : ('❌ ' + (j.error || '保存失败'));
+    } catch (e) {
+        $('priMsg').textContent = '❌ ' + e;
+    }
+    setTimeout(() => { $('priMsg').textContent = ''; }, 1500);
 }
 
 async function saveMirror() {
@@ -2385,7 +2651,7 @@ function args() {
         skip_existing: $('skip_existing').checked,
         spaces: $('spaces_opt').checked,
         keep_anchor: $('keep_existing').checked ? $('keep_anchor').value.trim() : '',
-        ignore_tags: $('ignore_tags').value
+        escape_paren: $('escape_paren').checked
     };
 }
 
@@ -2874,6 +3140,19 @@ def api_config_post():
             pass
         save_config(cfg)
         return jsonify({"ok": True})
+
+    if "tag_config" in data:   # 打标配置页：标签优先级 + 忽略标签，永久保存
+        d = data.get("tag_config") or {}
+        if "priority" in d:
+            cfg["priority"] = _norm_priority(d.get("priority"))
+        if "ignore_tags" in d:
+            cfg["ignore_tags"] = (d.get("ignore_tags") or "").strip()
+        if "auto_ignore_tags" in d:
+            cfg["auto_ignore_tags"] = (d.get("auto_ignore_tags") or "").strip()
+        save_config(cfg)
+        return jsonify({"ok": True, "priority": cfg["priority"],
+                        "ignore_tags": cfg["ignore_tags"],
+                        "auto_ignore_tags": cfg["auto_ignore_tags"]})
 
     if "tr_style" in data:   # 翻译文字颜色/字号，永久保存
         d = data.get("tr_style") or {}
