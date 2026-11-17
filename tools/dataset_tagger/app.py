@@ -121,8 +121,8 @@ PIXAI_MODELS = [
      "files": ["model.safetensors", "config.json",
                "preprocessor_config.json", "tagger_pipeline.py"],
      "label": "PixAI Tagger v1.0",
-     "remark": "动漫，3.1万标签含样式/版权标签，1008分辨率；角色0.27/标签0.17",
-     "size_gb": 1.9, "def_gen": 0.17, "def_char": 0.27},
+     "remark": "动漫，3.1万标签含样式/版权标签，1008分辨率；角色0.27/标签0.17/作品0.24",
+     "size_gb": 1.9, "def_gen": 0.17, "def_char": 0.27, "def_cpr": 0.24},
 ]
 
 MIRRORS = {"mirror": "https://hf-mirror.com", "official": "https://huggingface.co"}
@@ -806,12 +806,12 @@ def _load_pixai(model_id, cfg):
         return _pixai_cache[model_id]
 
 
-def _pixai_interrogate(model_id, pil_img, gen_t, char_t, cfg):
+def _pixai_interrogate(model_id, pil_img, gen_t, char_t, cfg, cpr_t=1.1):
     """返回 (角色标签, 作品标签(copyright), 普通标签)。
 
-    阈值映射：character 用 char_t，general 用 gen_t；copyright 用官方推荐值 0.24；
-    style 用 0.15 并入普通标签；meta / rating 不输出；gen_t >= 1 时（双模型模式
-    屏蔽普通标签）非角色类全部关闭。"""
+    阈值映射：character 用 char_t，general 用 gen_t；copyright 用 cpr_t
+    （>=1.0 视为不启用作品标签，全部屏蔽）；style 用 0.15 并入普通标签；
+    meta / rating 不输出；gen_t >= 1 时（双模型模式屏蔽普通标签）非角色类全部关闭。"""
     model, processor, split, tags, device = _load_pixai(model_id, cfg)
     import torch
     pv = processor(pil_img, return_tensors="pt")["pixel_values"].to(device)
@@ -829,12 +829,44 @@ def _pixai_interrogate(model_id, pil_img, gen_t, char_t, cfg):
             general = [(t, c) for t, c in seg if c >= gen_t]
         elif cat == "style" and gen_t < 1.0:
             general += [(t, c) for t, c in seg if c >= 0.15]
-        elif cat == "copyright" and gen_t < 1.0:
-            copyright = [(t, c) for t, c in seg if c >= 0.24]
+        elif cat == "copyright" and gen_t < 1.0 and cpr_t < 1.0:
+            copyright = [(t, c) for t, c in seg if c >= cpr_t]
     chars.sort(key=lambda t: -t[1])
     general.sort(key=lambda t: -t[1])
     copyright.sort(key=lambda t: -t[1])
     return chars, copyright, general
+
+
+def _pixai_copyright(model_id, pil_img, cpr_t, cfg):
+    """作品模型专用：只取 PixAI 模型的 copyright 类标签，阈值用 cpr_t。
+    返回 [(标签, 置信度)]，按置信度降序。"""
+    model, processor, split, tags, device = _load_pixai(model_id, cfg)
+    import torch
+    pv = processor(pil_img, return_tensors="pt")["pixel_values"].to(device)
+    with torch.no_grad():
+        probs = model(pv).sigmoid()[0].tolist()   # 按 tags_split 顺序排列
+
+    copyright, idx = [], 0
+    for cat, count in split:
+        if cat == "copyright":
+            copyright = [(tags[i], float(probs[i])) for i in range(idx, idx + count)
+                         if probs[i] >= cpr_t]
+            break
+        idx += count
+    copyright.sort(key=lambda t: -t[1])
+    return copyright
+
+
+def _merge_cpr(cpr, extra):
+    """合并作品标签（标签模型自带 + 作品模型提取），按归一化去重，先出现的优先。"""
+    seen = {_tag_norm(t) for t, _ in cpr}
+    out = list(cpr)
+    for t, c in extra:
+        n = _tag_norm(t)
+        if n not in seen:
+            seen.add(n)
+            out.append((t, c))
+    return out
 
 
 def _unload_taggers():
@@ -1194,14 +1226,15 @@ def _order_tags_priority(chars, cpr, general, items):
     return out
 
 
-def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg):
-    """按引擎分发标签推理（WD14 / CL / PixAI），统一返回 (角色, 作品(copyright), 普通)。"""
+def _tag_interrogate(model_id, im, gen_t, char_t, model_cfg, cpr_t=1.1):
+    """按引擎分发标签推理（WD14 / CL / PixAI），统一返回 (角色, 作品(copyright), 普通)。
+    cpr_t 只对 PixAI 引擎的 copyright 类生效（>=1.0 = 不打作品标签）。"""
     eng = model_entry(model_cfg, model_id).get("engine", "wd14")
     if eng == "cl":
         chars, general = _cl_interrogate(model_id, im, gen_t, char_t, model_cfg)
         return chars, [], general
     if eng == "pixai":
-        return _pixai_interrogate(model_id, im, gen_t, char_t, model_cfg)
+        return _pixai_interrogate(model_id, im, gen_t, char_t, model_cfg, cpr_t=cpr_t)
     chars, general = _wd14_interrogate(model_id, im, gen_t, char_t, model_cfg)
     return chars, [], general
 
@@ -1297,6 +1330,12 @@ def _run_job(cfg, model_cfg):
     mode = cfg["mode"]
     model = cfg["model"]
     char_model = cfg.get("char_model") or model   # 角色模型；与标签模型相同则单次推理
+    cpr_model = (cfg.get("cpr_model") or "").strip()   # 作品模型（仅 PixAI 系列），空 = 不启用
+    if mode != "tag":
+        cpr_model = ""
+    cpr_t = float(cfg.get("cpr_t", 1.1))
+    # 作品模型未启用时彻底屏蔽 copyright（标签模型是 PixAI 时也不打作品标签）
+    cpr_t_eff = cpr_t if cpr_model else 1.1
     prefix, suffix = cfg.get("prefix", ""), cfg.get("suffix", "")
     skip = cfg.get("skip_existing", False)
     spaces = bool(cfg.get("spaces", False)) and mode == "tag"
@@ -1325,8 +1364,8 @@ def _run_job(cfg, model_cfg):
                         tag_freq={}, tag_total=0)
 
         if mode == "tag":
-            # 提前加载（角色模型与标签模型可能不同，两个都加载），失败立刻报错
-            for mid in dict.fromkeys([char_model, model]):
+            # 提前加载（角色/标签/作品模型可能不同），失败立刻报错
+            for mid in dict.fromkeys([m for m in (char_model, model, cpr_model) if m]):
                 _load_tagger(mid, model_cfg)
 
         for path in imgs:
@@ -1358,21 +1397,39 @@ def _run_job(cfg, model_cfg):
                     if mode == "tag":
                         if char_model == model:
                             chars, cpr, general = _tag_interrogate(
-                                model, im, cfg["gen_t"], cfg["char_t"], model_cfg)
+                                model, im, cfg["gen_t"], cfg["char_t"], model_cfg,
+                                cpr_t=cpr_t_eff)
                         else:
-                            # 不同模型：角色模型只取角色（阈值 1.1 屏蔽普通标签），
+                            # 不同模型：角色模型只取角色（阈值 1.1 屏蔽普通/作品标签），
                             # 标签模型只取普通+作品标签，再拼接
                             chars, _, _ = _tag_interrogate(
                                 char_model, im, 1.1, cfg["char_t"], model_cfg)
                             _, cpr, general = _tag_interrogate(
-                                model, im, cfg["gen_t"], 1.1, model_cfg)
+                                model, im, cfg["gen_t"], 1.1, model_cfg,
+                                cpr_t=cpr_t_eff)
+                        if cpr_model:
+                            # 作品模型（PixAI）单独再取 copyright 标签；与标签模型
+                            # 是同一个模型时第一次推理已带 copyright，不重复推理
+                            if not (cpr_model == model
+                                    and model_entry(model_cfg, model).get("engine") == "pixai"):
+                                cpr = _merge_cpr(
+                                    cpr, _pixai_copyright(cpr_model, im, cpr_t, model_cfg))
+                        # 处理顺序：生成 → 空格转换 → 精确忽略 → 排序 → 括号转义
+                        # （忽略只作用于本次生成的标签，保留的旧标签/前缀/后缀不受影响）
+                        def _prep(grp):
+                            out = []
+                            for t, _c in grp:
+                                if spaces:
+                                    t = t.replace("_", " ")
+                                if ignore and _tag_norm(t) in ignore:
+                                    continue
+                                out.append((t, _c))
+                            return out
+
                         raw = _order_tags_priority(
-                            [t for t, _ in chars], [t for t, _ in cpr],
-                            [t for t, _ in general], pri_items)
-                        if spaces:
-                            raw = [t.replace("_", " ") for t in raw]
-                        if ignore:
-                            raw = [t for t in raw if _tag_norm(t) not in ignore]
+                            [t for t, _ in _prep(chars)],
+                            [t for t, _ in _prep(cpr)],
+                            [t for t, _ in _prep(general)], pri_items)
                         body = ", ".join(
                             [(_escape_tag(t) if escape_paren else t) for t in raw])
                     else:
@@ -1444,12 +1501,26 @@ def start_job(cfg):
             if not model_installed(m):
                 return False, f"{what}未下载，请先在配置窗口下载"
         cfg["char_model"] = char_model
+        # 作品模型：仅 PixAI 系列可选，空 = 不启用
+        cpr_model = (cfg.get("cpr_model") or "").strip()
+        if cpr_model:
+            m = model_entry(model_cfg, cpr_model)
+            if not m:
+                return False, "未知作品模型"
+            if m.get("engine") != "pixai":
+                return False, "作品模型仅支持 PixAI 系列"
+            if not model_installed(m):
+                return False, "作品模型未下载，请先在配置窗口下载"
+        cfg["cpr_model"] = cpr_model
     else:
         if model not in scan_nl_models():
             return False, "未知自然语言模型（GGUF 未找到）"
     try:
         cfg["gen_t"] = float(cfg.get("gen_t", 0.35))
         cfg["char_t"] = float(cfg.get("char_t", 0.85))
+        cfg["cpr_t"] = float(cfg.get("cpr_t", 1.1))
+        if not cfg.get("cpr_model"):
+            cfg["cpr_t"] = 1.1   # 未启用作品模型时彻底屏蔽 copyright
         cfg["n_ctx"] = int(cfg.get("n_ctx", 8192))
         cfg["nl_res"] = int(cfg.get("nl_res", 1536))
         cfg["maxt"] = min(4096, max(32, int(cfg.get("maxt", 512))))
@@ -1498,20 +1569,33 @@ def _run_compare(models, params):
                 if m["kind"] == "tag":
                     chars, cpr, general = _tag_interrogate(
                         m["id"], im, params["gen_t"], params["char_t"],
-                        model_cfg)
+                        model_cfg,
+                        cpr_t=params["cpr_t"] if params.get("cpr_model") else 1.1)
+                    if params.get("cpr_model"):
+                        # 作品模型（PixAI）单独再取 copyright 标签；与被对比的标签模型
+                        # 是同一个模型时第一次推理已带 copyright，不重复推理
+                        if not (params["cpr_model"] == m["id"]
+                                and model_entry(model_cfg, m["id"]).get("engine") == "pixai"):
+                            cpr = _merge_cpr(
+                                cpr, _pixai_copyright(
+                                    params["cpr_model"], im, params["cpr_t"], model_cfg))
+                    # 精确忽略在排序前对生成的标签生效（与批量打标顺序一致）
+                    ign = {_tag_norm(t) for t in (model_cfg.get("ignore_tags") or "").split(",")
+                           if _tag_norm(t)}
+                    if ign:
+                        chars = [it for it in chars if _tag_norm(it[0]) not in ign]
+                        cpr = [it for it in cpr if _tag_norm(it[0]) not in ign]
+                        general = [it for it in general if _tag_norm(it[0]) not in ign]
                     items = _order_tags_priority(
                         chars, cpr, general,
                         _norm_priority(model_cfg.get("priority")))
-                    # 与批量打标一致的忽略过滤：精确忽略 + 自动匹配忽略（打标配置页）
-                    ign = {_tag_norm(t) for t in (model_cfg.get("ignore_tags") or "").split(",")
-                           if _tag_norm(t)}
+                    # 自动匹配忽略：排序完成后对结果生效
                     auto_ign = {_tag_norm(t)
                                 for t in (model_cfg.get("auto_ignore_tags") or "").split(",")
                                 if _tag_norm(t)}
-                    if ign or auto_ign:
+                    if auto_ign:
                         items = [it for it in items
-                                 if (not ign or _tag_norm(it[0]) not in ign)
-                                 and not any(s in _tag_norm(it[0]) for s in auto_ign)]
+                                 if not any(s in _tag_norm(it[0]) for s in auto_ign)]
                     res["output"] = ", ".join([_escape_tag(t) for t, _ in items])
                     # 附带置信度（3 位小数），对比页在每个标签旁展示
                     res["detail"] = [[t, round(c, 3)] for t, c in items]
@@ -1584,6 +1668,8 @@ def start_compare(models, params):
     try:
         params = {"gen_t": float(params.get("gen_t", 0.35)),
                   "char_t": float(params.get("char_t", 0.85)),
+                  "cpr_t": float(params.get("cpr_t", 1.1)),
+                  "cpr_model": (params.get("cpr_model") or "").strip(),
                   "n_ctx": int(params.get("n_ctx", 8192)),
                   "res": int(params.get("res", 1536)),
                   "maxt": min(4096, max(32, int(params.get("maxt", 512)))),
@@ -1591,6 +1677,16 @@ def start_compare(models, params):
                                or DEFAULT_NL_PROMPT}
     except (TypeError, ValueError):
         return False, "参数必须是数字"
+    if params["cpr_model"]:
+        e = model_entry(cfg, params["cpr_model"])
+        if not e:
+            return False, "未知作品模型"
+        if e.get("engine") != "pixai":
+            return False, "作品模型仅支持 PixAI 系列"
+        if not model_installed(e):
+            return False, f"作品模型未下载：{params['cpr_model']}"
+    else:
+        params["cpr_t"] = 1.1   # 未启用作品模型时彻底屏蔽 copyright
     if params["res"] < 0 or params["n_ctx"] < 512:
         return False, "分辨率/上下文参数不合法"
     threading.Thread(target=_run_compare, args=(picked, params), daemon=True).start()
@@ -1879,6 +1975,13 @@ PAGE = r"""<!doctype html>
       <input type="number" id="gen_t" value="0.35" min="0" max="1" step="0.05">
     </div>
 
+    <div class="row" id="cprRow">
+      <label class="lab">作品模型</label>
+      <select id="cpr_model"></select>
+      <label class="lab" style="width:90px; text-align:right">作品阈值</label>
+      <input type="number" id="cpr_t" value="1.1" min="0" max="2" step="0.01" disabled>
+    </div>
+
     <div id="nlRow" style="display:none">
       <div class="row">
         <label class="lab">提示词</label>
@@ -1942,6 +2045,8 @@ PAGE = r"""<!doctype html>
     <div class="tip">结果写入图片同名的 .txt 文件（UTF-8）。角色模型与标签模型相同则一次推理同时出角色和普通标签；
     不同则先用角色模型识别角色（角色阈值）、再用标签模型识别普通标签（标签阈值）后拼接。
     标签顺序由"打标配置"页的优先级决定（默认"角色和作品 → 其余标签"）；评分（rating）标签不写入。
+    作品模型仅 PixAI 系列可选（默认"无"）：选"无"时不打任何作品标签（标签模型是 PixAI 时也屏蔽 copyright），作品阈值置灰失效；
+    选了作品模型则用它单独提取 copyright（作品）标签（阈值默认 0.24），与标签模型的结果合并后再排序。
     勾选"括号转义"时标签中的左右括号会自动加 \ 转义（已有 \ 的不重复加）。
     勾选"保留锚点前标签"时：已有 txt 会先按锚点标签（如 girl / 1girl）切开，锚点之前的标签原样保留，
     新打标结果接在其后（顺序：前缀追加 → 保留标签 → 按优先级排序的新标签 → 后缀追加）；
@@ -1993,6 +2098,12 @@ PAGE = r"""<!doctype html>
       <input type="number" id="cmp_char_t" value="0.85" min="0" max="1" step="0.05">
     </div>
     <div class="row">
+      <label class="lab">作品模型</label>
+      <select id="cmp_cpr_model"></select>
+      <label class="lab" style="width:90px; text-align:right">作品阈值</label>
+      <input type="number" id="cmp_cpr_t" value="1.1" min="0" max="2" step="0.01" disabled>
+    </div>
+    <div class="row">
       <label class="lab">输出长度</label>
       <input type="number" id="cmp_maxt" value="512" min="32" max="4096" step="32" style="width:90px">
       <label class="lab" style="width:90px; text-align:right">图片分辨率</label>
@@ -2004,7 +2115,7 @@ PAGE = r"""<!doctype html>
         <option value="2048">2048（超清·慢）</option>
       </select>
     </div>
-    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；输出长度（最终可见文本 token 数，不含思考）与图片分辨率仅对自然语言模型生效</div>
+    <div class="tip" style="margin:-4px 0 10px 120px">标签阈值仅对标签模型生效；作品模型仅 PixAI 系列可选（选"无"不启用，此时 PixAI 标签模型自身也不打作品标签，作品阈值置灰），选了会给每个标签模型的结果额外补充 copyright 标签；输出长度（最终可见文本 token 数，不含思考）与图片分辨率仅对自然语言模型生效</div>
 
     <div class="row">
       <label class="lab">NL 提示词</label>
@@ -2163,6 +2274,32 @@ function renderModels() {
             if (firstOk) sel.value = firstOk.id;
         }
     }
+    renderCprSelects();
+}
+
+// 作品模型下拉：仅 PixAI 系列模型 + "无"（默认无）
+function renderCprSelects() {
+    const list = models.filter(m => m.kind === 'tag' && m.engine === 'pixai');
+    for (const sel of [$('cpr_model'), $('cmp_cpr_model')]) {
+        const cur = sel.value;
+        sel.innerHTML = '';
+        const none = document.createElement('option');
+        none.value = '';
+        none.textContent = '无';
+        sel.appendChild(none);
+        for (const m of list) {
+            const o = document.createElement('option');
+            o.value = m.id;
+            o.textContent = m.label + (m.installed ? '' : '（未下载）');
+            o.disabled = !m.installed;
+            sel.appendChild(o);
+        }
+        if (cur && [...sel.options].some(o => o.value === cur && !o.disabled)) {
+            sel.value = cur;   // 保持当前选择
+        }
+    }
+    syncCprThr('cpr_model', 'cpr_t');
+    syncCprThr('cmp_cpr_model', 'cmp_cpr_t');
 }
 
 async function loadModels() {
@@ -2180,6 +2317,7 @@ $('mode').onchange = () => {
     const nl = $('mode').value === 'nl';
     $('charRow').style.display = nl ? 'none' : '';
     $('tagRow').style.display = nl ? 'none' : '';
+    $('cprRow').style.display = nl ? 'none' : '';
     $('nlRow').style.display = nl ? '' : 'none';
     $('spacesLabel').style.display = nl ? 'none' : '';
     $('keepLabel').style.display = nl ? 'none' : '';
@@ -2244,6 +2382,19 @@ $('char_model').onchange = () => {
     const m = models.find(x => x.id === $('char_model').value);
     if (m && m.def_char != null) $('char_t').value = m.def_char;
 };
+// 切换作品模型：无 → 阈值置灰并回到 1.1（屏蔽作品标签）；选了模型 → 填推荐阈值（PixAI 官方 0.24）
+function syncCprThr(selId, thrId) {
+    const m = models.find(x => x.id === $(selId).value);
+    if (m) {
+        $(thrId).value = (m.def_cpr != null) ? m.def_cpr : 0.24;
+        $(thrId).disabled = false;
+    } else {
+        $(thrId).value = 1.1;
+        $(thrId).disabled = true;
+    }
+}
+$('cpr_model').onchange = () => syncCprThr('cpr_model', 'cpr_t');
+$('cmp_cpr_model').onchange = () => syncCprThr('cmp_cpr_model', 'cmp_cpr_t');
 
 // ---- 文件夹：浏览 / 检查 ----
 async function pickFolder() {
@@ -2643,6 +2794,8 @@ function args() {
         char_model: $('char_model').value,
         gen_t: parseFloat($('gen_t').value),
         char_t: parseFloat($('char_t').value),
+        cpr_model: $('cpr_model').value,
+        cpr_t: parseFloat($('cpr_t').value),
         nl_prompt: $('nl_prompt').value,
         nl_res: parseInt($('nl_res').value),
         maxt: parseInt($('maxt').value) || 512,
@@ -2855,6 +3008,8 @@ async function runCompare() {
         chips.map(c => ({ id: c.value, kind: c.dataset.kind }))));
     fd.append('gen_t', $('cmp_gen_t').value);
     fd.append('char_t', $('cmp_char_t').value);
+    fd.append('cpr_model', $('cmp_cpr_model').value);
+    fd.append('cpr_t', $('cmp_cpr_t').value);
     fd.append('maxt', $('cmp_maxt').value);
     fd.append('res', $('cmp_res').value);
     fd.append('nl_prompt', $('cmp_nl_prompt').value);
@@ -3048,6 +3203,7 @@ def _all_models(cfg):
         t = thr_map.get(m["id"]) or {}
         def_gen = t.get("gen", m.get("def_gen", 0.35))
         def_char = t.get("char", m.get("def_char", 0.85))
+        def_cpr = t.get("cpr", m.get("def_cpr", 0.24))
         models.append({"id": m["id"], "label": m["label"], "kind": "tag",
                        "remark": m.get("remark", ""), "size_gb": m.get("size_gb", 0),
                        "custom": False,
@@ -3055,6 +3211,7 @@ def _all_models(cfg):
                        "gated": m.get("gated", False),
                        "def_gen": def_gen,
                        "def_char": def_char,
+                       "def_cpr": def_cpr,
                        "visible": m["id"] not in cfg.get("hidden", []),
                        "installed": model_installed(m)})
     for key, m in scan_nl_models().items():
