@@ -1815,10 +1815,17 @@ EDIT_HTML = """
                     body: JSON.stringify({tag: addTag})
                 }).then(r => r.json()).then(d => {
                     if (d && d.ok) {
-                        tagGroup.appendChild(makeTagItem(item.dataset.tag, d.freq || 0));
+                        const ni = makeTagItem(item.dataset.tag, d.freq || 0);
+                        tagGroup.appendChild(ni);
+                        // 补上拖拽绑定，否则新加的标签要刷新后才能拖动排序
+                        if (window.__setupDrag) window.__setupDrag(ni);
                         syncTextarea();
                         item.style.background = '#00b894';
                         setTimeout(() => { item.style.background = ''; }, 400);
+                        // 翻译开启中：给新标签补译文
+                        if (typeof fetchAndFillTranslations === 'function') {
+                            fetchAndFillTranslations().catch(() => {});
+                        }
                     } else {
                         alert('添加失败：' + ((d && d.error) || '未知错误'));
                     }
@@ -1880,13 +1887,15 @@ EDIT_HTML = """
                     const items = Array.from(document.querySelectorAll('.tag-group .tag-item'));
                     const rect = mainTarget.getBoundingClientRect();
                     let index = items.indexOf(mainTarget) + (x < rect.left + rect.width / 2 ? 0 : 1);
+                    // 先取出标签文本：endDrag 返回时 dragged 会被置空，异步回调里不能再读它
+                    const draggedTag = dragged.dataset.tag;
                     fetch('/api/insert_tag', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({tag: dragged.dataset.tag, index: index})
+                        body: JSON.stringify({tag: draggedTag, index: index})
                     }).then(r => r.json()).then(d => {
                         if (d && d.ok) {
-                            const item = makeTagItem(dragged.dataset.tag, d.freq || 0);
+                            const item = makeTagItem(draggedTag, d.freq || 0);
                             if (index >= items.length) tagGroup.appendChild(item);
                             else tagGroup.insertBefore(item, items[index]);
                             if (window.__setupDrag) window.__setupDrag(item);
