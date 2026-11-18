@@ -40,6 +40,7 @@ _MT_LANGS = [
 # ---- 翻译配置（保存在脚本同目录 translate_config.json）----
 _CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_config.json")
 _translate_cfg = {"target_lang": "Simplified Chinese", "model_src": "auto",
+                  "translate_src": "model",
                   "zh_color": "#6c5ce7", "zh_size": 13}
 
 def _load_translate_cfg():
@@ -56,6 +57,12 @@ def _load_translate_cfg():
     # 兼容非法值
     if _translate_cfg.get("model_src") not in ("auto", "hf", "mirror"):
         _translate_cfg["model_src"] = "auto"
+    if _translate_cfg.get("translate_src") not in ("model", "vocab"):
+        _translate_cfg["translate_src"] = "model"
+    # 词表翻译仅支持简体中文
+    if (_translate_cfg.get("translate_src") == "vocab"
+            and _translate_cfg.get("target_lang") != "Simplified Chinese"):
+        _translate_cfg["target_lang"] = "Simplified Chinese"
     if _translate_cfg.get("target_lang") not in [v for _, v in _MT_LANGS]:
         _translate_cfg["target_lang"] = "Simplified Chinese"
     c = _translate_cfg.get("zh_color")
@@ -195,13 +202,87 @@ def _unload_translator():
         _mt_device_info = "未加载"
         print("[translate] 翻译模型已卸载，显存已释放")
 
+# ---- 词表翻译（读取标签超市 tags_merged*.csv 的 zh 列，仅简体中文）----
+# 词表里 zh 是人工/词表翻译（zh_mt 是机翻，不用）；查不到的标签由前端显示红色"无法翻译"
+_VOCAB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "label_shop")
+_VOCAB_FILES = ("tags_merged.csv", "tags_merged_anima.csv")
+_vocab_lock = threading.Lock()
+_vocab = None        # {归一化标签名或别名: 中文翻译}
+_vocab_sig = None    # 各 CSV 的 mtime，变了自动重载（跟随标签超市的编辑更新）
+_vocab_info = "未加载"
+
+def _vocab_norm(s):
+    """标签归一化：去转义反斜杠、下划线视为空格、折叠空白、转小写。
+    使 blue_eyes / blue eyes / \\(blue eyes\\) 都能命中词表。"""
+    s = s.replace("\\", "").strip().lower().replace("_", " ")
+    return " ".join(s.split())
+
+def _load_vocab():
+    """懒加载词表（name + aliases → zh）；两份 CSV 都读，同名保留先出现的。
+    返回 dict；标签超市 CSV 都不存在时返回空 dict。"""
+    global _vocab, _vocab_sig, _vocab_info
+    with _vocab_lock:
+        sig = tuple(os.path.getmtime(os.path.join(_VOCAB_DIR, f))
+                    if os.path.isfile(os.path.join(_VOCAB_DIR, f)) else 0
+                    for f in _VOCAB_FILES)
+        if _vocab is not None and sig == _vocab_sig:
+            return _vocab
+        import csv as _csv
+        t0 = time.time()
+        table = {}
+        n_files = 0
+        for f in _VOCAB_FILES:
+            p = os.path.join(_VOCAB_DIR, f)
+            if not os.path.isfile(p):
+                continue
+            n_files += 1
+            with open(p, "r", encoding="utf-8-sig", errors="replace") as fh:
+                for r in _csv.DictReader(fh):
+                    zh = (r.get("zh") or "").strip()
+                    if not zh:
+                        continue
+                    name = (r.get("name") or "").strip()
+                    if name:
+                        table.setdefault(_vocab_norm(name), zh)
+                    for a in (r.get("aliases") or "").split("|"):
+                        a = a.strip()
+                        if a:
+                            table.setdefault(_vocab_norm(a), zh)
+        _vocab = table
+        _vocab_sig = sig
+        _vocab_info = (f"词表：{n_files} 份 · {len(table)} 条（标签超市）"
+                       if table else "未找到标签超市词表")
+        print(f"[translate] {_vocab_info} · 加载 {time.time() - t0:.1f}s")
+        return _vocab
+
+def _vocab_lookup(table, text):
+    """两级查询：先按归一化原文查；未命中且带括号时去掉括号再查一次
+    （词表标签多为无括号形态，如 \\(censored\\) → censored）。"""
+    n = _vocab_norm(text)
+    zh = table.get(n)
+    if zh is None:
+        s = n.replace("(", "").replace(")", "")
+        if s != n:
+            zh = table.get(s)
+    return zh
+
 def translate_text(text):
-    """按当前配置的目标语言翻译一段文本。"""
-    if _mt_model is None and text:
+    """按当前配置翻译一段文本。
+    词表模式：查标签超市词表（仅简体中文），命中返回译文，未命中返回 None。
+    模型模式：走本地 Hy-MT2，失败返回 ""（与旧行为一致）。"""
+    if not text:
+        return ""
+    if _translate_cfg.get("translate_src") == "vocab":
+        table = _load_vocab()
+        if not table:
+            return ""
+        return _vocab_lookup(table, text)   # 未命中返回 None → 前端标"无法翻译"
+    if _mt_model is None:
         with _mt_lock:  # 懒加载：第一次点翻译时才加载模型
             if _mt_model is None:
                 _load_translator()
-    if _mt_model is None or not text:
+    if _mt_model is None:
         return ""
     try:
         lang = _translate_cfg.get("target_lang", "Simplified Chinese")
@@ -595,6 +676,7 @@ EDIT_HTML = """
         .btn-translate { background:#6c5ce7; color:white; cursor:pointer; }
         .btn-translate.active { background:#a29bfe; }
         .tag-zh { color:var(--tag-zh-color, #6c5ce7); font-size:var(--tag-zh-size, 13px); margin-left:6px; }
+        .tag-zh.tag-zh-miss { color:#e74c3c; }
         
         .add-tag-line { display:flex; gap:8px; align-items:center; }
         .add-tag-line input {
@@ -847,6 +929,13 @@ EDIT_HTML = """
             <h3 class="modal-title">翻译设置</h3>
             <p class="modal-tip" id="tcfgDevice" style="margin-bottom: 12px;">翻译模型：未加载</p>
             <div class="tcfg-row">
+                <label>翻译方式</label>
+                <select id="tcfgMode" onchange="tcfgModeChange()">
+                    <option value="model">模型翻译（AI，支持多语言）</option>
+                    <option value="vocab">词表翻译（标签超市词表，仅简体中文）</option>
+                </select>
+            </div>
+            <div class="tcfg-row">
                 <label>目标语言</label>
                 <select id="tcfgLang">
                     {% for label, value in mt_langs %}
@@ -1036,13 +1125,18 @@ EDIT_HTML = """
             const resp = await fetch('/api/translate?tags=' + encodeURIComponent(need.join(',')));
             const data = await resp.json();
             if (data && data.translations) {
+                const miss = new Set(data.missing || []);
                 items.forEach(it => {
                     const t = it.dataset.origTag;
-                    if (t && data.translations[t] && !it.querySelector('.tag-zh')) {
-                        const sp = document.createElement('span');
-                        sp.className = 'tag-zh';
-                        sp.innerText = data.translations[t];
-                        it.appendChild(sp);
+                    if (t && !it.querySelector('.tag-zh')) {
+                        const zh = data.translations[t];
+                        // 词表/模型都查不到的标签：显示红色"无法翻译"
+                        if (zh || miss.has(t)) {
+                            const sp = document.createElement('span');
+                            sp.className = 'tag-zh' + (zh ? '' : ' tag-zh-miss');
+                            sp.innerText = zh || '无法翻译';
+                            it.appendChild(sp);
+                        }
                     }
                 });
             } else {
@@ -1108,21 +1202,36 @@ EDIT_HTML = """
                 document.documentElement.style.setProperty('--tag-zh-size', size + 'px');
             }
         }
+        // 翻译方式切换：词表模式锁定简体中文、禁用模型下载源
+        function tcfgModeChange() {
+            const vocab = document.getElementById('tcfgMode').value === 'vocab';
+            const lang = document.getElementById('tcfgLang');
+            if (vocab) lang.value = 'Simplified Chinese';
+            lang.disabled = vocab;
+            document.getElementById('tcfgSrc').disabled = vocab;
+            const dev = document.getElementById('tcfgDevice');
+            if (vocab && tcfgVocabInfo) dev.innerText = tcfgVocabInfo;
+            else dev.innerText = '翻译模型：' + (tcfgModelLoaded ? '已加载 · ' + tcfgModelDevice : tcfgModelDevice);
+        }
+        let tcfgVocabInfo = '', tcfgModelDevice = '未加载', tcfgModelLoaded = false;
         async function openTranslateCfg() {
             try {
                 const resp = await fetch('/api/translate_config');
                 const data = await resp.json();
                 if (data && data.config) {
+                    document.getElementById('tcfgMode').value = data.config.translate_src || 'model';
                     document.getElementById('tcfgLang').value = data.config.target_lang;
                     document.getElementById('tcfgSrc').value = data.config.model_src;
                     document.getElementById('tcfgColor').value = data.config.zh_color;
                     document.getElementById('tcfgSize').value = data.config.zh_size;
                 }
                 if (data) {
-                    const dev = document.getElementById('tcfgDevice');
-                    dev.innerText = '翻译模型：' + (data.loaded ? ('已加载 · ' + data.device) : data.device);
+                    tcfgVocabInfo = data.vocab_info || '';
+                    tcfgModelDevice = data.device || '未加载';
+                    tcfgModelLoaded = !!data.loaded;
                 }
             } catch (e) { /* 读取失败也允许打开面板修改 */ }
+            tcfgModeChange();
             document.getElementById('translateCfgModal').style.display = 'flex';
         }
         function closeTranslateCfg() {
@@ -1131,6 +1240,7 @@ EDIT_HTML = """
         async function saveTranslateCfg() {
             const langSel = document.getElementById('tcfgLang');
             const src = document.getElementById('tcfgSrc').value;
+            const mode = document.getElementById('tcfgMode').value;
             const zhColor = document.getElementById('tcfgColor').value;
             const zhSize = parseInt(document.getElementById('tcfgSize').value);
             try {
@@ -1138,6 +1248,7 @@ EDIT_HTML = """
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ target_lang: langSel.value, model_src: src,
+                                           translate_src: mode,
                                            zh_color: zhColor,
                                            zh_size: isNaN(zhSize) ? 13 : zhSize })
                 });
@@ -1594,22 +1705,42 @@ def ping():
 @app.route("/api/translate")
 def api_translate():
     tags = [t for t in request.args.get("tags", "").split(",") if t.strip()]
-    out = {}
-    for t in tags:
-        zh = translate_text(t)
-        if zh:
-            out[t] = zh
-    return {"ok": _mt_model is not None, "translations": out}
+    out, missing = {}, []
+    err = ""
+    vocab_mode = _translate_cfg.get("translate_src") == "vocab"
+    if vocab_mode and not _load_vocab():
+        err = "未找到标签超市词表（tools/label_shop/tags_merged*.csv）"
+        missing = list(tags)
+    else:
+        for t in tags:
+            zh = translate_text(t)
+            if zh:
+                out[t] = zh
+            else:
+                missing.append(t)
+    return {"ok": not err, "translations": out, "missing": missing,
+            "error": err,
+            "device": (_vocab_info if vocab_mode else _mt_device_info)}
 
 @app.route("/api/translate_unload", methods=["POST"])
 def api_translate_unload():
     _unload_translator()
+    # 词表模式下一并释放词表内存（下次翻译按 mtime 自动重载）
+    global _vocab, _vocab_sig, _vocab_info
+    if _translate_cfg.get("translate_src") == "vocab":
+        with _vocab_lock:
+            _vocab, _vocab_sig, _vocab_info = None, None, "未加载"
     return {"ok": True, "loaded": _mt_model is not None}
 
 @app.route("/api/translate_config", methods=["GET"])
 def api_get_tcfg():
+    vocab_info = ""
+    if _translate_cfg.get("translate_src") == "vocab":
+        _load_vocab()   # 词表模式下预加载，便于设置窗口显示词表状态
+        vocab_info = _vocab_info
     return {"ok": True, "config": _translate_cfg,
-            "device": _mt_device_info, "loaded": _mt_model is not None}
+            "device": _mt_device_info, "loaded": _mt_model is not None,
+            "vocab_info": vocab_info}
 
 @app.route("/api/translate_config", methods=["POST"])
 def api_set_tcfg():
@@ -1620,6 +1751,12 @@ def api_set_tcfg():
         _translate_cfg["target_lang"] = lang
     if src in ("auto", "hf", "mirror"):
         _translate_cfg["model_src"] = src
+    if payload.get("translate_src") in ("model", "vocab"):
+        _translate_cfg["translate_src"] = payload["translate_src"]
+    # 词表翻译仅支持简体中文
+    if (_translate_cfg.get("translate_src") == "vocab"
+            and _translate_cfg.get("target_lang") != "Simplified Chinese"):
+        _translate_cfg["target_lang"] = "Simplified Chinese"
     c = payload.get("zh_color")
     if (isinstance(c, str) and len(c) == 7 and c.startswith("#")
             and all(ch in "0123456789abcdefABCDEF" for ch in c[1:])):
