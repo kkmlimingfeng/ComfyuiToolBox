@@ -3,7 +3,7 @@
   "model_src": "mirror",
   "translate_src": "vocab",
   "vocab_file": "tags_merged_anima.csv",
-  "show_edit_btn": false,
+  "show_edit_btn": true,
   "show_del_btn": true,
   "bb_on": true,
   "bb_click_add": true,

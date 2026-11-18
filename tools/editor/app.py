@@ -1659,6 +1659,8 @@ EDIT_HTML = """
             }
 
             function saveGeom() {
+                // 面板隐藏时 rect 全 0（ResizeObserver 初始回调也会触发），不能覆盖已保存的位置
+                if (!panel.offsetParent) return;
                 try {
                     const r = panel.getBoundingClientRect();
                     localStorage.setItem(KEY_POS, JSON.stringify({x: r.left, y: r.top}));
@@ -1704,6 +1706,8 @@ EDIT_HTML = """
                 saveGeom();
                 panel.style.display = 'none';
             }
+            // 拖右下角调整大小/移动后立即持久化，刷新页面也保持
+            if (window.ResizeObserver) new ResizeObserver(saveGeom).observe(panel);
 
             // 设置里的"显示小黑板"开关（applyUIPrefs 调用）
             window.__bbApply = function(on) {
