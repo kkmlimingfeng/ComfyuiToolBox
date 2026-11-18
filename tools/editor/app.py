@@ -37,10 +37,12 @@ _MT_LANGS = [
     ("Italiano", "Italian"),
 ]
 
-# ---- 翻译配置（保存在脚本同目录 translate_config.json）----
+# ---- 翻译/界面配置（保存在脚本同目录 translate_config.json）----
 _CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "translate_config.json")
 _translate_cfg = {"target_lang": "Simplified Chinese", "model_src": "auto",
-                  "translate_src": "model",
+                  "translate_src": "model", "vocab_file": "all",
+                  "show_edit_btn": True, "show_del_btn": True, "bb_on": False,
+                  "bb_click_add": False,
                   "zh_color": "#6c5ce7", "zh_size": 13}
 
 def _load_translate_cfg():
@@ -59,6 +61,8 @@ def _load_translate_cfg():
         _translate_cfg["model_src"] = "auto"
     if _translate_cfg.get("translate_src") not in ("model", "vocab"):
         _translate_cfg["translate_src"] = "model"
+    for key in ("show_edit_btn", "show_del_btn", "bb_on", "bb_click_add"):
+        _translate_cfg[key] = bool(_translate_cfg.get(key))
     # 词表翻译仅支持简体中文
     if (_translate_cfg.get("translate_src") == "vocab"
             and _translate_cfg.get("target_lang") != "Simplified Chinese"):
@@ -206,11 +210,22 @@ def _unload_translator():
 # 词表里 zh 是人工/词表翻译（zh_mt 是机翻，不用）；查不到的标签由前端显示红色"无法翻译"
 _VOCAB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "label_shop")
-_VOCAB_FILES = ("tags_merged.csv", "tags_merged_anima.csv")
 _vocab_lock = threading.Lock()
 _vocab = None        # {归一化标签名或别名: 中文翻译}
-_vocab_sig = None    # 各 CSV 的 mtime，变了自动重载（跟随标签超市的编辑更新）
+_vocab_sig = None    # 各 CSV 的 mtime + 词表选择，变了自动重载（跟随标签超市的编辑更新）
 _vocab_info = "未加载"
+
+def _vocab_files():
+    """label_shop 下可用的词表 CSV（tags_merged*.csv，排除 classified 覆盖表）。"""
+    files = []
+    try:
+        for f in sorted(os.listdir(_VOCAB_DIR)):
+            if (f.startswith("tags_merged") and f.endswith(".csv")
+                    and f != "tags_merged_classified.csv"):
+                files.append(f)
+    except OSError:
+        pass
+    return files
 
 def _vocab_norm(s):
     """标签归一化：去转义反斜杠、下划线视为空格、折叠空白、转小写。
@@ -219,24 +234,25 @@ def _vocab_norm(s):
     return " ".join(s.split())
 
 def _load_vocab():
-    """懒加载词表（name + aliases → zh）；两份 CSV 都读，同名保留先出现的。
-    返回 dict；标签超市 CSV 都不存在时返回空 dict。"""
+    """懒加载词表（name + aliases → zh）；按配置选择词表文件，CSV 更新后自动重载。
+    vocab_file="all" 时合并全部词表（同名保留先出现的），否则只读指定文件。"""
     global _vocab, _vocab_sig, _vocab_info
     with _vocab_lock:
-        sig = tuple(os.path.getmtime(os.path.join(_VOCAB_DIR, f))
-                    if os.path.isfile(os.path.join(_VOCAB_DIR, f)) else 0
-                    for f in _VOCAB_FILES)
+        files = _vocab_files()
+        vf = _translate_cfg.get("vocab_file", "all")
+        use = files if (vf == "all" or vf not in files) else [vf]
+        sig = (vf, tuple(os.path.getmtime(os.path.join(_VOCAB_DIR, f))
+                         if os.path.isfile(os.path.join(_VOCAB_DIR, f)) else 0
+                         for f in use))
         if _vocab is not None and sig == _vocab_sig:
             return _vocab
         import csv as _csv
         t0 = time.time()
         table = {}
-        n_files = 0
-        for f in _VOCAB_FILES:
+        for f in use:
             p = os.path.join(_VOCAB_DIR, f)
             if not os.path.isfile(p):
                 continue
-            n_files += 1
             with open(p, "r", encoding="utf-8-sig", errors="replace") as fh:
                 for r in _csv.DictReader(fh):
                     zh = (r.get("zh") or "").strip()
@@ -251,7 +267,7 @@ def _load_vocab():
                             table.setdefault(_vocab_norm(a), zh)
         _vocab = table
         _vocab_sig = sig
-        _vocab_info = (f"词表：{n_files} 份 · {len(table)} 条（标签超市）"
+        _vocab_info = (f"词表：{'全部合并' if vf == 'all' else vf} · {len(table)} 条（标签超市）"
                        if table else "未找到标签超市词表")
         print(f"[translate] {_vocab_info} · 加载 {time.time() - t0:.1f}s")
         return _vocab
@@ -302,7 +318,10 @@ app = Flask(__name__)
 @app.after_request
 def no_store(resp):
     # iframe 内嵌时禁止浏览器缓存，保证门户主题参数与代码更新即时生效
-    resp.headers["Cache-Control"] = "no-store"
+    # 三重声明，兼容对 no-store 处理不彻底的浏览器（如联想 SLBrowser 的加速缓存层）
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
     return resp
 
 PATH_RECORD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_path.txt")
@@ -627,11 +646,6 @@ EDIT_HTML = """
         .freq { font-size:12px; opacity:0.75; }
 
         .edit-icon {
-            display: none;
-            position: absolute;
-            right: 4px;
-            top: 50%;
-            transform: translateY(-50%);
             width: 18px;
             height: 18px;
             border-radius: 3px;
@@ -644,9 +658,64 @@ EDIT_HTML = """
         }
         body.dark .edit-icon { background: #4a5568; }
         body.light .edit-icon { background: #9ca3af; }
-        .tag-item:hover .edit-icon {
-            display: block;
+        /* 按钮容器：悬浮显示，右对齐排列；某个按钮隐藏时其余自动右移补位 */
+        .tag-acts {
+            display: none;
+            position: absolute;
+            right: 4px;
+            top: 50%;
+            transform: translateY(-50%);
+            gap: 4px;
+            flex-direction: row-reverse;   /* 垃圾桶在最右，往左依次是铅笔、加号 */
         }
+        .tag-item:hover .tag-acts { display: flex; }
+        /* 设置控制显隐 */
+        body.hide-edit .tag-item .edit-icon:not(.add-icon):not(.del-icon) { display: none !important; }
+        body.hide-del .tag-item .del-icon { display: none !important; }
+        body.bb-off .tag-item .add-icon { display: none !important; }
+
+        /* ===== 悬浮小黑板 ===== */
+        #blackboard {
+            position: fixed; right: 24px; top: 90px; width: 280px; height: 200px;
+            min-width: 200px; min-height: 120px;
+            z-index: 1600; border-radius: 8px;
+            border-width: 1px; border-style: solid;
+            box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+            display: none; flex-direction: column;
+            resize: both; overflow: hidden;   /* 右下角可拖拽调整大小 */
+        }
+        body.dark #blackboard { background: #232326; border-color: #3a3a3c; }
+        body.light #blackboard { background: #ffffff; border-color: #d2d2d7; }
+        #bb-head {
+            padding: 8px 12px; font-weight: 600; font-size: 14px;
+            cursor: move; user-select: none;
+        }
+        #bb-tags {
+            flex: 1; min-height: 60px; overflow-y: auto; padding: 10px;
+            display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start;
+        }
+        .bb-tag {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 4px 8px; border-radius: 4px; font-size: 13px;
+            cursor: grab; user-select: none; max-width: 100%;
+            transition: background 0.2s;
+        }
+        .bb-tag:active { cursor: grabbing; }
+        body.dark .bb-tag { background: #374151; }
+        body.light .bb-tag { background: #e4e7ec; color: #1f2937; }
+        .bb-tag .bb-del { color: #e74c3c; font-weight: 700; cursor: pointer; visibility: hidden; }
+        .bb-tag:hover .bb-del { visibility: visible; }
+        .bb-tag.dragging { position: fixed; z-index: 9999; opacity: .85; box-shadow: 0 4px 12px rgba(0,0,0,.4); }
+        .bb-drag-left { box-shadow: -2px 0 0 0 #74b9ff; }
+        .bb-drag-right { box-shadow: 2px 0 0 0 #74b9ff; }
+        .bb-placeholder { border: 2px dashed #74b9ff; border-radius: 4px; }
+        #bb-foot {
+            padding: 6px 12px; font-size: 12px;
+            border-top-width: 1px; border-top-style: solid;
+        }
+        body.dark #bb-foot { border-top-color: #3a3a3c; }
+        body.light #bb-foot { border-top-color: #d2d2d7; }
+        #bb-empty { opacity: .5; font-size: 12px; }
 
         .inline-input {
             border: 1px solid #74b9ff;
@@ -718,7 +787,7 @@ EDIT_HTML = """
             position: fixed;
             inset: 0;
             background: rgba(0,0,0,0.6);
-            z-index: 1000;
+            z-index: 2000;
             align-items: center;
             justify-content: center;
         }
@@ -761,6 +830,18 @@ EDIT_HTML = """
         /* 翻译设置弹窗 */
         .tcfg-row { margin: 14px 0; text-align: left; }
         .tcfg-row label { display: block; margin-bottom: 6px; opacity: 0.75; font-size: 14px; }
+        /* 勾选框行：勾选框在描述前面，同一行对齐不换行 */
+        .tcfg-row label.tcfg-check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 0;
+            opacity: 1;
+            font-size: 14px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .tcfg-row label.tcfg-check input[type="checkbox"] { width: 16px; height: 16px; margin: 0; cursor: pointer; flex: none; }
         .tcfg-row select {
             width: 100%;
             padding: 10px 12px;
@@ -923,17 +1004,33 @@ EDIT_HTML = """
         </div>
     </div>
 
-    <!-- 翻译设置弹窗 -->
+    <!-- 设置弹窗 -->
     <div class="modal-mask" id="translateCfgModal">
         <div class="modal-box" style="min-width: 420px;">
-            <h3 class="modal-title">翻译设置</h3>
+            <h3 class="modal-title">设置</h3>
             <p class="modal-tip" id="tcfgDevice" style="margin-bottom: 12px;">翻译模型：未加载</p>
+            <div class="tcfg-row">
+                <label class="tcfg-check"><input type="checkbox" id="tcfgEditBtn"> 显示编辑按钮（悬浮标签时）</label>
+            </div>
+            <div class="tcfg-row">
+                <label class="tcfg-check"><input type="checkbox" id="tcfgDelBtn"> 显示删除按钮（悬浮标签时）</label>
+            </div>
+            <div class="tcfg-row">
+                <label class="tcfg-check"><input type="checkbox" id="tcfgBB"> 显示小黑板</label>
+            </div>
+            <div class="tcfg-row">
+                <label class="tcfg-check"><input type="checkbox" id="tcfgBbClick"> 点击小黑板标签添加到当前图片末尾</label>
+            </div>
             <div class="tcfg-row">
                 <label>翻译方式</label>
                 <select id="tcfgMode" onchange="tcfgModeChange()">
                     <option value="model">模型翻译（AI，支持多语言）</option>
                     <option value="vocab">词表翻译（标签超市词表，仅简体中文）</option>
                 </select>
+            </div>
+            <div class="tcfg-row" id="tcfgVocabRow" style="display:none">
+                <label>词表</label>
+                <select id="tcfgVocab"></select>
             </div>
             <div class="tcfg-row">
                 <label>目标语言</label>
@@ -980,7 +1077,7 @@ EDIT_HTML = """
         <div class="top-bar">
             <div class="progress">进度：{{now}} / {{total}}{% if img_name %}<span class="img-name" title="{{ img_name }}">{{ img_name }}</span>{% endif %}</div>
             <div style="display: flex; gap: 10px;">
-                <button class="change-dir-btn" onclick="openTranslateCfg()">⚙️ 翻译设置</button>
+                <button class="change-dir-btn" onclick="openTranslateCfg()">⚙️ 设置</button>
                 <button class="change-dir-btn" onclick="openModal()">切换数据集文件夹</button>
             </div>
         </div>
@@ -1012,7 +1109,7 @@ EDIT_HTML = """
                     <input type="checkbox" name="del_tag_list" value="{{tag}}">
                     <span class="tag-text">{{tag}}</span>
                     <span class="freq">[{{tag_count[tag]}}次]</span>
-                    <span class="edit-icon" onclick="startEdit(this)">✏</span>
+                    <span class="tag-acts"><span class="edit-icon add-icon" onclick="bbAdd(this)" title="加入小黑板">＋</span><span class="edit-icon" onclick="startEdit(this)">✏</span><span class="edit-icon del-icon" onclick="delTag(this)" title="删除该标签">🗑</span></span>
                 </div>
                 {% endfor %}
             </div>
@@ -1033,6 +1130,15 @@ EDIT_HTML = """
         </form>
     </div>
 
+    <!-- 悬浮小黑板（常用标签收藏板） -->
+    <div id="blackboard">
+        <div id="bb-head">📌 小黑板</div>
+        <div id="bb-tags"></div>
+        <div id="bb-foot">
+            <label><input type="checkbox" id="bb-click-add"> 点击标签添加到当前图片末尾</label>
+        </div>
+    </div>
+
     <script>
         // 弹窗控制
         function openModal(){
@@ -1045,7 +1151,8 @@ EDIT_HTML = """
         // 全局主题协议（同 SELECT 页）
         (function () {
             function applyTheme(t) {
-                document.body.className = t;
+                document.body.classList.remove('dark', 'light');
+                document.body.classList.add(t);
                 try { localStorage.setItem("toolTheme", t); } catch (e) {}
                 var btn = document.getElementById("themeBtn");
                 if (btn) btn.textContent = t === "dark" ? "💡" : "🌙";
@@ -1176,6 +1283,7 @@ EDIT_HTML = """
                     const sel = document.getElementById('tcfgLang');
                     sel.value = d.config.target_lang;
                     _targetLangLabel = sel.selectedOptions[0] ? sel.selectedOptions[0].text : '';
+                    applyUIPrefs(d.config);   // 按钮显隐 + 小黑板开关
                 }
             } catch (e) { /* 拿不到语言标签就用默认文案 */ }
             if (btn) btn.innerText = translateBtnText(_zhOn);
@@ -1191,7 +1299,7 @@ EDIT_HTML = """
         // 切图使用原生 POST → redirect → 服务端重新渲染。
         // 这是最稳定的路径，避免内嵌 WebView / iframe 对 AJAX DOM 更新产生兼容问题。
 
-        // ===== 翻译设置 =====
+        // ===== 设置 =====
         // 译文颜色/字号：写到 CSS 变量，立即生效
         function applyZhStyle(cfg) {
             if (cfg.zh_color) {
@@ -1202,13 +1310,23 @@ EDIT_HTML = """
                 document.documentElement.style.setProperty('--tag-zh-size', size + 'px');
             }
         }
-        // 翻译方式切换：词表模式锁定简体中文、禁用模型下载源
+        // 界面偏好：编辑/删除按钮显隐、小黑板显隐、小黑板点击添加开关
+        function applyUIPrefs(cfg) {
+            document.body.classList.toggle('hide-edit', !cfg.show_edit_btn);
+            document.body.classList.toggle('hide-del', !cfg.show_del_btn);
+            document.body.classList.toggle('bb-off', !cfg.bb_on);
+            const bbClick = document.getElementById('bb-click-add');
+            if (bbClick) bbClick.checked = cfg.bb_click_add === true;
+            if (window.__bbApply) window.__bbApply(!!cfg.bb_on);
+        }
+        // 翻译方式切换：词表模式锁定简体中文、禁用模型下载源、显示词表选择
         function tcfgModeChange() {
             const vocab = document.getElementById('tcfgMode').value === 'vocab';
             const lang = document.getElementById('tcfgLang');
             if (vocab) lang.value = 'Simplified Chinese';
             lang.disabled = vocab;
             document.getElementById('tcfgSrc').disabled = vocab;
+            document.getElementById('tcfgVocabRow').style.display = vocab ? '' : 'none';
             const dev = document.getElementById('tcfgDevice');
             if (vocab && tcfgVocabInfo) dev.innerText = tcfgVocabInfo;
             else dev.innerText = '翻译模型：' + (tcfgModelLoaded ? '已加载 · ' + tcfgModelDevice : tcfgModelDevice);
@@ -1224,6 +1342,26 @@ EDIT_HTML = """
                     document.getElementById('tcfgSrc').value = data.config.model_src;
                     document.getElementById('tcfgColor').value = data.config.zh_color;
                     document.getElementById('tcfgSize').value = data.config.zh_size;
+                    document.getElementById('tcfgEditBtn').checked = data.config.show_edit_btn !== false;
+                    document.getElementById('tcfgDelBtn').checked = data.config.show_del_btn !== false;
+                    document.getElementById('tcfgBB').checked = data.config.bb_on === true;
+                    document.getElementById('tcfgBbClick').checked = data.config.bb_click_add === true;
+                }
+                // 词表下拉：全部合并 + 各词表文件
+                const vocabSel = document.getElementById('tcfgVocab');
+                vocabSel.innerHTML = '';
+                const files = (data && data.vocab_files) || [];
+                const optAll = document.createElement('option');
+                optAll.value = 'all'; optAll.textContent = '全部合并';
+                vocabSel.appendChild(optAll);
+                files.forEach(f => {
+                    const o = document.createElement('option');
+                    o.value = f; o.textContent = f;
+                    vocabSel.appendChild(o);
+                });
+                if (data && data.config) {
+                    vocabSel.value = (data.config.vocab_file === 'all' || files.includes(data.config.vocab_file))
+                        ? data.config.vocab_file : 'all';
                 }
                 if (data) {
                     tcfgVocabInfo = data.vocab_info || '';
@@ -1249,6 +1387,11 @@ EDIT_HTML = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ target_lang: langSel.value, model_src: src,
                                            translate_src: mode,
+                                           vocab_file: document.getElementById('tcfgVocab').value,
+                                           show_edit_btn: document.getElementById('tcfgEditBtn').checked,
+                                           show_del_btn: document.getElementById('tcfgDelBtn').checked,
+                                           bb_on: document.getElementById('tcfgBB').checked,
+                                           bb_click_add: document.getElementById('tcfgBbClick').checked,
                                            zh_color: zhColor,
                                            zh_size: isNaN(zhSize) ? 13 : zhSize })
                 });
@@ -1258,6 +1401,7 @@ EDIT_HTML = """
                     const btn = document.getElementById('translateBtn');
                     if (btn && !_zhOn) btn.innerText = translateBtnText(false);
                     applyZhStyle(data.config);
+                    applyUIPrefs(data.config);
                     closeTranslateCfg();
                     // 翻译开启中：清空旧语言译文，按新语言重新拉取
                     if (_zhOn) {
@@ -1490,7 +1634,407 @@ EDIT_HTML = """
             } else {
                 init();
             }
+            // 供小黑板插入新标签后绑定同样的拖拽排序
+            window.__setupDrag = setupDrag;
         })();
+
+        // ===== 悬浮小黑板（常用标签收藏板） =====
+        (function() {
+            const KEY_TAGS = 'bbTags', KEY_POS = 'bbPos', KEY_SIZE = 'bbSize';
+            const LONG_PRESS_MS = 350, MOVE_THRESHOLD = 5;
+            const panel = document.getElementById('blackboard');
+            const tagBox = document.getElementById('bb-tags');
+            const tagGroup = document.querySelector('.tag-group');
+            let dragSuppress = false;   // 拖拽结束后的 click 不当作点击添加
+
+            function load() {
+                try { return JSON.parse(localStorage.getItem(KEY_TAGS)) || []; }
+                catch (e) { return []; }
+            }
+            function save(list) {
+                try { localStorage.setItem(KEY_TAGS, JSON.stringify(list)); } catch (e) {}
+            }
+            function esc(s) {
+                const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+            }
+
+            function saveGeom() {
+                try {
+                    const r = panel.getBoundingClientRect();
+                    localStorage.setItem(KEY_POS, JSON.stringify({x: r.left, y: r.top}));
+                    // 尺寸异常（如被旧 bug 存成 1x1）时不写入，避免坏数据循环
+                    if (r.width >= 160 && r.height >= 80) {
+                        localStorage.setItem(KEY_SIZE, JSON.stringify({w: r.width, h: r.height}));
+                    }
+                } catch (e) {}
+            }
+            function applyGeom() {
+                // 开启时恢复上次关闭时的位置和大小
+                try {
+                    const pos = JSON.parse(localStorage.getItem(KEY_POS) || 'null');
+                    if (pos) {
+                        panel.style.left = Math.max(0, pos.x) + 'px';
+                        panel.style.top = Math.max(0, pos.y) + 'px';
+                        panel.style.right = 'auto';
+                    }
+                    const size = JSON.parse(localStorage.getItem(KEY_SIZE) || 'null');
+                    if (size && size.w >= 160 && size.h >= 80) {
+                        panel.style.width = size.w + 'px';
+                        panel.style.height = size.h + 'px';
+                    }
+                } catch (e) {}
+            }
+
+            function openBB() {
+                applyGeom();
+                panel.style.display = 'flex';
+                // 强制最小尺寸：localStorage 残留的 1x1 等异常尺寸在此自愈
+                if (panel.offsetWidth < 160) panel.style.width = '280px';
+                if (panel.offsetHeight < 80) panel.style.height = '200px';
+                // 显示后钳制到视口内，防止 localStorage 里的异常坐标让黑板跑到屏幕外
+                const r = panel.getBoundingClientRect();
+                const maxX = Math.max(0, window.innerWidth - 60);
+                const maxY = Math.max(0, window.innerHeight - 50);
+                if (r.left > maxX || r.top > maxY) {
+                    panel.style.left = Math.min(r.left, maxX) + 'px';
+                    panel.style.top = Math.min(r.top, maxY) + 'px';
+                }
+            }
+            function closeBB() {
+                saveGeom();
+                panel.style.display = 'none';
+            }
+
+            // 设置里的"显示小黑板"开关（applyUIPrefs 调用）
+            window.__bbApply = function(on) {
+                if (on) openBB(); else closeBB();
+            };
+            // 右上角 ✕ 已移除：小黑板显隐统一走设置里的"显示小黑板"开关
+
+            // 主编辑区标签上的 ＋：收藏到小黑板
+            window.bbAdd = function(btn) {
+                const tag = btn.closest('.tag-item').dataset.origTag;
+                const list = load();
+                if (list.some(t => tagKey(t) === tagKey(tag))) { openBB(); return; }
+                list.push(tag);
+                save(list);
+                render();
+                openBB();
+            };
+
+            window.syncTextarea = function() {
+                const items = document.querySelectorAll('.tag-group .tag-item');
+                const ta = document.querySelector('textarea[name="full_tag_text"]');
+                if (ta) ta.value = Array.from(items).map(it => it.dataset.origTag).join(', ');
+            };
+            const syncTextarea = window.syncTextarea;
+
+            function makeTagItem(tag, freq) {
+                const div = document.createElement('div');
+                div.className = 'tag-item';
+                div.dataset.origTag = tag;
+                const cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.name = 'del_tag_list'; cb.value = tag;
+                const txt = document.createElement('span');
+                txt.className = 'tag-text'; txt.textContent = tag;
+                const fq = document.createElement('span');
+                fq.className = 'freq'; fq.textContent = '[' + freq + '次]';
+                const add = document.createElement('span');
+                add.className = 'edit-icon add-icon'; add.textContent = '＋';
+                add.title = '加入小黑板'; add.onclick = () => bbAdd(add);
+                const pen = document.createElement('span');
+                pen.className = 'edit-icon'; pen.textContent = '✏';
+                pen.onclick = () => startEdit(pen);
+                const del = document.createElement('span');
+                del.className = 'edit-icon del-icon'; del.textContent = '🗑';
+                del.title = '删除该标签'; del.onclick = () => delTag(del);
+                const acts = document.createElement('span');
+                acts.className = 'tag-acts';
+                acts.append(add, pen, del);
+                div.append(cb, txt, fq, acts);
+                return div;
+            }
+
+            function render() {
+                const list = load();
+                tagBox.innerHTML = '';
+                if (!list.length) {
+                    const tip = document.createElement('span');
+                    tip.id = 'bb-empty';
+                    tip.textContent = '点击主编辑区标签上的 ＋ 收藏到这里';
+                    tagBox.appendChild(tip);
+                    return;
+                }
+                list.forEach(tag => {
+                    const el = document.createElement('div');
+                    el.className = 'bb-tag';
+                    el.dataset.tag = tag;
+                    const del = document.createElement('span');
+                    del.className = 'bb-del'; del.title = '从小黑板移除'; del.textContent = '−';
+                    const txt = document.createElement('span');
+                    txt.className = 'bb-text'; txt.textContent = tag;
+                    el.append(del, txt);
+                    tagBox.appendChild(el);
+                });
+                setupBB();
+            }
+
+            function setupBB() {
+                tagBox.querySelectorAll('.bb-tag').forEach(item => {
+                    item.querySelector('.bb-del').onclick = () => {
+                        save(load().filter(t => t !== item.dataset.tag));
+                        render();
+                    };
+                    bindDrag(item);
+                });
+            }
+
+            // 点击标签（开关开启且非拖拽）：追加到当前图片标签列表末尾
+            tagBox.addEventListener('click', e => {
+                if (dragSuppress) { dragSuppress = false; return; }
+                if (e.target.classList.contains('bb-del')) return;
+                const item = e.target.closest('.bb-tag');
+                if (!item) return;
+                if (!document.getElementById('bb-click-add').checked) return;
+                // 查重：当前标签列表里已有相同标签则不添加（红色闪烁提示）
+                const addTag = item.dataset.tag;
+                const exists = Array.from(document.querySelectorAll('.tag-group .tag-item'))
+                    .some(el => tagKey(el.dataset.origTag || '') === tagKey(addTag));
+                if (exists) {
+                    item.style.background = '#e17055';
+                    setTimeout(() => { item.style.background = ''; }, 600);
+                    return;
+                }
+                fetch('/api/append_tag', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({tag: addTag})
+                }).then(r => r.json()).then(d => {
+                    if (d && d.ok) {
+                        tagGroup.appendChild(makeTagItem(item.dataset.tag, d.freq || 0));
+                        syncTextarea();
+                        item.style.background = '#00b894';
+                        setTimeout(() => { item.style.background = ''; }, 400);
+                    } else {
+                        alert('添加失败：' + ((d && d.error) || '未知错误'));
+                    }
+                }).catch(err => alert('请求失败：' + err.message));
+            });
+
+            // 点击添加开关：切换后即时持久化到配置（切图刷新后不丢）
+            const bbClickChk = document.getElementById('bb-click-add');
+            if (bbClickChk) {
+                bbClickChk.addEventListener('change', () => {
+                    fetch('/api/translate_config', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({bb_click_add: bbClickChk.checked})
+                    }).catch(() => {});
+                });
+            }
+
+            // ---- 小黑板标签长按拖拽：黑板内排序 / 拖到主编辑区插入鼠标位置 ----
+            let lpTimer = null, sx = 0, sy = 0, dragging = false;
+            let dragged = null, offX = 0, offY = 0, ph = null, phParent = null, phNext = null;
+
+            function clearIndicators() {
+                document.querySelectorAll('.drag-over-left, .drag-over-right, .bb-drag-left, .bb-drag-right')
+                    .forEach(el => el.classList.remove('drag-over-left', 'drag-over-right', 'bb-drag-left', 'bb-drag-right'));
+            }
+            function pickTarget(x, y, cls) {
+                for (const el of document.elementsFromPoint(x, y)) {
+                    if (el.classList && el.classList.contains(cls) && el !== dragged && el !== ph) return el;
+                }
+                return null;
+            }
+
+            function startDrag(item, x, y) {
+                dragging = true;
+                dragSuppress = true;
+                dragged = item;
+                const rect = item.getBoundingClientRect();
+                offX = x - rect.left; offY = y - rect.top;
+                ph = document.createElement('div');
+                ph.className = 'bb-placeholder';
+                ph.style.width = rect.width + 'px'; ph.style.height = rect.height + 'px';
+                phParent = item.parentNode; phNext = item.nextSibling;
+                item.parentNode.insertBefore(ph, item);
+                item.style.position = 'fixed';
+                item.style.left = rect.left + 'px'; item.style.top = rect.top + 'px';
+                item.style.width = rect.width + 'px';
+                item.classList.add('dragging');
+                document.body.style.userSelect = 'none';
+            }
+
+            function endDrag(x, y) {
+                const mainTarget = pickTarget(x, y, 'tag-item');
+                const bbTarget = pickTarget(x, y, 'bb-tag');
+                if (mainTarget && tagGroup.contains(mainTarget)) {
+                    // 插入主编辑区：按鼠标在目标标签的左右侧计算 index
+                    clearIndicators();
+                    restore();
+                    const items = Array.from(document.querySelectorAll('.tag-group .tag-item'));
+                    const rect = mainTarget.getBoundingClientRect();
+                    let index = items.indexOf(mainTarget) + (x < rect.left + rect.width / 2 ? 0 : 1);
+                    fetch('/api/insert_tag', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({tag: dragged.dataset.tag, index: index})
+                    }).then(r => r.json()).then(d => {
+                        if (d && d.ok) {
+                            const item = makeTagItem(dragged.dataset.tag, d.freq || 0);
+                            if (index >= items.length) tagGroup.appendChild(item);
+                            else tagGroup.insertBefore(item, items[index]);
+                            if (window.__setupDrag) window.__setupDrag(item);
+                            syncTextarea();
+                        } else {
+                            alert('插入失败：' + ((d && d.error) || '未知错误'));
+                        }
+                    }).catch(err => alert('请求失败：' + err.message));
+                } else if (bbTarget) {
+                    // 黑板内排序
+                    const rect = bbTarget.getBoundingClientRect();
+                    if (x < rect.left + rect.width / 2) bbTarget.parentNode.insertBefore(ph, bbTarget);
+                    else bbTarget.parentNode.insertBefore(ph, bbTarget.nextSibling);
+                    ph.parentNode.replaceChild(dragged, ph);
+                    save(Array.from(tagBox.querySelectorAll('.bb-tag')).map(el => el.dataset.tag));
+                    cleanup();
+                    render();
+                } else {
+                    restore();   // 落点无效，回到原位
+                }
+                dragged = null; dragging = false;
+                document.body.style.userSelect = '';
+                clearIndicators();
+            }
+
+            function restore() {
+                if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+                if (dragged && phParent) {
+                    dragged.classList.remove('dragging');
+                    dragged.style.position = ''; dragged.style.left = '';
+                    dragged.style.top = ''; dragged.style.width = '';
+                    phParent.insertBefore(dragged, phNext);
+                }
+                ph = null;
+            }
+
+            function cleanup() {
+                if (dragged) {
+                    dragged.classList.remove('dragging');
+                    dragged.style.position = ''; dragged.style.left = '';
+                    dragged.style.top = ''; dragged.style.width = '';
+                }
+                ph = null; phParent = null; phNext = null;
+            }
+
+            function bindDrag(item) {
+                item.addEventListener('mousedown', e => {
+                    if (e.button !== 0) return;
+                    if (e.target.classList.contains('bb-del')) return;
+                    sx = e.clientX; sy = e.clientY;
+                    lpTimer = setTimeout(() => startDrag(item, e.clientX, e.clientY), LONG_PRESS_MS);
+                });
+            }
+
+            document.addEventListener('mousemove', e => {
+                if (lpTimer && !dragging) {
+                    if (Math.abs(e.clientX - sx) > MOVE_THRESHOLD || Math.abs(e.clientY - sy) > MOVE_THRESHOLD) {
+                        clearTimeout(lpTimer); lpTimer = null;
+                    }
+                }
+                if (!dragging) return;
+                e.preventDefault();
+                dragged.style.left = (e.clientX - offX) + 'px';
+                dragged.style.top = (e.clientY - offY) + 'px';
+                clearIndicators();
+                const mainTarget = pickTarget(e.clientX, e.clientY, 'tag-item');
+                const bbTarget = pickTarget(e.clientX, e.clientY, 'bb-tag');
+                if (mainTarget && tagGroup.contains(mainTarget)) {
+                    const rect = mainTarget.getBoundingClientRect();
+                    mainTarget.classList.add(e.clientX < rect.left + rect.width / 2 ? 'drag-over-left' : 'drag-over-right');
+                } else if (bbTarget) {
+                    const rect = bbTarget.getBoundingClientRect();
+                    bbTarget.classList.add(e.clientX < rect.left + rect.width / 2 ? 'bb-drag-left' : 'bb-drag-right');
+                }
+            });
+
+            document.addEventListener('mouseup', e => {
+                if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+                if (dragging) endDrag(e.clientX, e.clientY);
+            });
+
+            // ---- 面板整体移动（按住标题栏） ----
+            const head = document.getElementById('bb-head');
+            let mvTimer = null, mvOff = null;
+            head.addEventListener('mousedown', e => {
+                if (e.button !== 0) return;
+                const rect = panel.getBoundingClientRect();
+                mvOff = {x: e.clientX - rect.left, y: e.clientY - rect.top};
+                const move = ev => {
+                    panel.style.left = Math.max(0, ev.clientX - mvOff.x) + 'px';
+                    panel.style.top = Math.max(0, ev.clientY - mvOff.y) + 'px';
+                    panel.style.right = 'auto';
+                };
+                const up = () => {
+                    document.removeEventListener('mousemove', move);
+                    document.removeEventListener('mouseup', up);
+                    try {
+                        const r = panel.getBoundingClientRect();
+                        localStorage.setItem(KEY_POS, JSON.stringify({x: r.left, y: r.top}));
+                    } catch (err) {}
+                };
+                document.addEventListener('mousemove', move);
+                document.addEventListener('mouseup', up);
+                e.preventDefault();
+            });
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', render);
+            } else {
+                render();
+            }
+        })();
+
+        // 删除按钮：直接从当前图片删除该标签（悬浮垃圾桶）
+        function delTag(btn) {
+            const item = btn.closest('.tag-item');
+            const tag = item.dataset.origTag;
+            fetch('/api/delete_tag', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tag: tag})
+            }).then(r => r.json()).then(d => {
+                if (d && d.ok) {
+                    item.remove();
+                    window.syncTextarea();
+                } else {
+                    alert('删除失败：' + ((d && d.error) || '未知错误'));
+                }
+            }).catch(e => alert('请求失败：' + e.message));
+        }
+
+        // ---- 标签去重（忽略大小写、下划线/空格与转义括号差异）----
+        function tagKey(s) {
+            s = s.replace(/\\\\([()])/g, '$1').trim().toLowerCase();
+            return s.replace(/_/g, ' ').split(/\\s+/).join(' ');
+        }
+        // 每张图片加载后对 textarea 自动去重：重复标签只保留首次出现的
+        function dedupTextarea() {
+            const ta = document.querySelector('textarea[name="full_tag_text"]');
+            if (!ta || !ta.value.trim()) return;
+            const seen = new Set(), out = [];
+            for (const p of ta.value.split(',')) {
+                const t = p.trim();
+                if (!t) continue;
+                const k = tagKey(t);
+                if (seen.has(k)) continue;
+                seen.add(k);
+                out.push(t);
+            }
+            ta.value = out.join(', ');
+        }
+        dedupTextarea();
     </script>
 </body>
 </html>
@@ -1740,7 +2284,7 @@ def api_get_tcfg():
         vocab_info = _vocab_info
     return {"ok": True, "config": _translate_cfg,
             "device": _mt_device_info, "loaded": _mt_model is not None,
-            "vocab_info": vocab_info}
+            "vocab_info": vocab_info, "vocab_files": _vocab_files()}
 
 @app.route("/api/translate_config", methods=["POST"])
 def api_set_tcfg():
@@ -1753,6 +2297,12 @@ def api_set_tcfg():
         _translate_cfg["model_src"] = src
     if payload.get("translate_src") in ("model", "vocab"):
         _translate_cfg["translate_src"] = payload["translate_src"]
+    vf = payload.get("vocab_file")
+    if vf == "all" or (isinstance(vf, str) and vf in _vocab_files()):
+        _translate_cfg["vocab_file"] = vf
+    for key in ("show_edit_btn", "show_del_btn", "bb_on", "bb_click_add"):
+        if key in payload:
+            _translate_cfg[key] = bool(payload[key])
     # 词表翻译仅支持简体中文
     if (_translate_cfg.get("translate_src") == "vocab"
             and _translate_cfg.get("target_lang") != "Simplified Chinese"):
@@ -1810,6 +2360,72 @@ def api_replace_tags():
                 f.write(", ".join(new_tags))
             changed_files += 1
     return {"ok": True, "changed_files": changed_files}
+
+def _tag_key(s):
+    """标签归一化：去转义括号、忽略大小写与下划线/空白差异，用于重复判断。"""
+    s = str(s).replace("\\(", "(").replace("\\)", ")").strip().lower()
+    return " ".join(s.replace("_", " ").split())
+
+@app.route("/api/append_tag", methods=["POST"])
+def api_append_tag():
+    """小黑板：把一个标签追加到当前图片标签列表末尾。"""
+    payload = request.get_json(silent=True) or {}
+    tag = (payload.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "缺少标签"}
+    txt_path = get_txt_path()
+    if not txt_path:
+        return {"ok": False, "error": "无当前图片"}
+    tags = get_current_tag_list()
+    key = _tag_key(tag)
+    if any(_tag_key(t) == key for t in tags):
+        return {"ok": False, "error": "标签已存在"}
+    tags.append(tag)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(", ".join(tags))
+    return {"ok": True, "freq": count_all_tags_frequency().get(tag, 0)}
+
+@app.route("/api/insert_tag", methods=["POST"])
+def api_insert_tag():
+    """小黑板：把一个标签插入当前图片标签列表的指定位置。"""
+    payload = request.get_json(silent=True) or {}
+    tag = (payload.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "缺少标签"}
+    txt_path = get_txt_path()
+    if not txt_path:
+        return {"ok": False, "error": "无当前图片"}
+    tags = get_current_tag_list()
+    try:
+        index = int(payload.get("index", len(tags)))
+    except (TypeError, ValueError):
+        index = len(tags)
+    index = max(0, min(index, len(tags)))
+    key = _tag_key(tag)
+    if any(_tag_key(t) == key for t in tags):
+        return {"ok": False, "error": "标签已存在"}
+    tags.insert(index, tag)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(", ".join(tags))
+    return {"ok": True, "freq": count_all_tags_frequency().get(tag, 0)}
+
+@app.route("/api/delete_tag", methods=["POST"])
+def api_delete_tag():
+    """从当前图片标签列表中删除指定标签（全部同名项）。"""
+    payload = request.get_json(silent=True) or {}
+    tag = (payload.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "缺少标签"}
+    txt_path = get_txt_path()
+    if not txt_path:
+        return {"ok": False, "error": "无当前图片"}
+    tags = get_current_tag_list()
+    new_tags = [t for t in tags if t != tag]
+    if new_tags == tags:
+        return {"ok": False, "error": "标签不存在"}
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(", ".join(new_tags))
+    return {"ok": True}
 
 @app.route("/api/reorder_tags", methods=["POST"])
 def api_reorder_tags():

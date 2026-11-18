@@ -1,6 +1,12 @@
 {
   "target_lang": "Simplified Chinese",
   "model_src": "mirror",
-  "zh_color": "#15b300",
+  "translate_src": "vocab",
+  "vocab_file": "tags_merged_anima.csv",
+  "show_edit_btn": false,
+  "show_del_btn": true,
+  "bb_on": true,
+  "bb_click_add": true,
+  "zh_color": "#008f37",
   "zh_size": 14
 }
